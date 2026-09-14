@@ -165,14 +165,29 @@ python scripts/humanoid_retarget_pipeline_adapt.py
 
 ## Visualize a Result
 
-Results contain the final robot `qpos` and the metadata required by the GLFW
-MuJoCo viewer:
+Open a result with the default GLFW viewer:
 
 ```bash
 python scripts/visualize_robot_retarget_result.py \
   --result output/unitree_g1_retarget/dance1_subject2_smplx_unitree_g1.npz \
   --play
 ```
+
+For browser or headless batch visualization, point the Viser backend at a
+result folder:
+
+```bash
+python scripts/visualize_robot_retarget_result.py \
+  --result-dir output/unitree_g1_retarget \
+  --viewer-backend viser \
+  --viser-host 0.0.0.0 \
+  --viser-port 8080 \
+  --play
+```
+
+Open the clickable `Network` URL printed in the terminal.
+
+Use **Refresh** to load new results while batch retargeting is running.
 
 ## Batch Retargeting
 

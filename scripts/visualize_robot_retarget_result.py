@@ -64,11 +64,19 @@ def parse_args():
     parser.add_argument("--all-smpl-point-radius", type=float, default=0.004)
     parser.add_argument("--all-smpl-point-alpha", type=float, default=0.9)
     parser.add_argument("--result", type=Path, default=DEFAULT_RESULT, help="Saved retarget .npz.")
+    parser.add_argument(
+        "--result-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Viser batch mode: recursively scan a folder for completed retarget .npz files; "
+            "the browser can start empty and refresh as new results arrive."
+        ),
+    )
     parser.add_argument("--robot-xml", type=Path, default=None, help="Override robot XML path.")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=-1)
-    parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--fps", type=float, default=0.0, help="0 uses result fps adjusted by --stride.")
+    parser.add_argument("--fps", type=float, default=0.0, help="0 uses the FPS stored in the result.")
     parser.add_argument(
         "--seek-hold-speed",
         type=float,
@@ -94,9 +102,9 @@ def parse_args():
     parser.add_argument("--play", dest="paused", action="store_false")
     parser.add_argument("--dry-run", action="store_true", help="Load result/model and print summary without opening viewer.")
     parser.add_argument("--record-video", type=Path, default=None, help="Render selected frames to an mp4/video file.")
-    parser.add_argument("--record-width", type=int, default=1280)
-    parser.add_argument("--record-height", type=int, default=720)
-    parser.add_argument("--record-fps", type=float, default=0.0, help="0 uses --fps/result fps after stride.")
+    parser.add_argument("--record-width", type=int, default=1920)
+    parser.add_argument("--record-height", type=int, default=1080)
+    parser.add_argument("--record-fps", type=float, default=0.0, help="0 uses --fps or the FPS stored in the result.")
 
     parser.add_argument("--show-source-slots", action="store_true", default=False)
     parser.add_argument("--no-show-source-slots", dest="show_source_slots", action="store_false")
@@ -203,20 +211,31 @@ def parse_args():
     parser.add_argument("--show-right-ui", action="store_true", default=False)
     parser.add_argument(
         "--viewer-backend",
-        choices=("passive", "glfw-ui"),
+        choices=("passive", "glfw-ui", "viser"),
         default="glfw-ui",
-        help="glfw-ui uses the default custom GLFW viewer; passive uses mujoco.viewer.launch_passive.",
+        help=(
+            "glfw-ui uses the default custom GLFW viewer; viser serves an interactive browser viewer "
+            "without requiring a display on the host; passive uses mujoco.viewer.launch_passive."
+        ),
     )
     parser.add_argument("--ui-panel-width", type=int, default=320, help="Left-side panel width for --viewer-backend glfw-ui.")
     parser.add_argument("--ui-window-width", type=int, default=2400, help="Initial GLFW window width for --viewer-backend glfw-ui.")
     parser.add_argument("--ui-window-height", type=int, default=1500, help="Initial GLFW window height for --viewer-backend glfw-ui.")
+    parser.add_argument("--viser-host", default="0.0.0.0", help="Bind address for --viewer-backend viser.")
+    parser.add_argument("--viser-port", type=int, default=8080, help="HTTP/WebSocket port for --viewer-backend viser.")
+    parser.add_argument(
+        "--viser-public-url",
+        default=None,
+        help="Externally forwarded URL to print verbatim, for example an SSH proxy or tunnel URL.",
+    )
+    parser.add_argument("--viser-label", default="UMR Retarget Viewer", help="Browser title for --viewer-backend viser.")
     parser.add_argument(
         "--object-render-source",
         choices=("auto", "xml", "obj"),
         default="auto",
         help="Object mesh source for source/robot object rendering. auto uses XML when present, otherwise OBJ.",
     )
-    parser.add_argument("--ghost-trail", action="store_true", default=False, help="Start the GLFW UI viewer with ghost trail rendering enabled.")
+    parser.add_argument("--ghost-trail", action="store_true", default=False, help="Start the GLFW UI viewer with ghost trail rendering enabled (GLFW only).")
     parser.add_argument("--ghost-interval", type=float, default=1.0, help="Seconds between ghost trail samples, clamped to [0, 5].")
     return parser.parse_args()
 
@@ -1409,9 +1428,9 @@ def run_all_mode(args) -> None:
     total_frames = min(len(entry["qpos_all"]) for entry in entries)
     start = max(0, int(args.start))
     end = total_frames if int(args.end) < 0 else min(total_frames, int(args.end))
-    frame_ids = np.arange(start, end, max(1, int(args.stride)), dtype=np.int32)
+    frame_ids = np.arange(start, end, dtype=np.int32)
     if frame_ids.size == 0:
-        raise ValueError(f"No frames selected for --all: total={total_frames}, start={start}, end={end}, stride={args.stride}")
+        raise ValueError(f"No frames selected for --all: total={total_frames}, start={start}, end={end}")
 
     spacing = float(args.all_spacing)
     center = 0.5 * (len(entries) - 1)
@@ -1443,7 +1462,7 @@ def run_all_mode(args) -> None:
         entry["qpos_slice"] = qslice
     smpl_point_overlay = prepare_all_smpl_point_overlay(args, entries, frame_ids)
 
-    fps = float(args.fps) if float(args.fps) > 0.0 else float(saved_fps) / max(1, int(args.stride))
+    fps = float(args.fps) if float(args.fps) > 0.0 else float(saved_fps)
     dt = 1.0 / max(fps, 1e-6)
     print(f"[{VIS_PREFIX}][All] robots={len(entries)}, frames={len(frame_ids)}/{total_frames}, fps={fps:.3f}")
     for entry in entries:
@@ -1494,6 +1513,26 @@ def run_all_mode(args) -> None:
         elif keycode in (ord("E"), ord("e")):
             frame_cursor = min(len(frame_ids) - 1, frame_cursor + one_second_frames)
             print(f"[{VIS_PREFIX}][All] +1s -> frame {frame_cursor + 1}/{len(frame_ids)}")
+
+    if str(args.viewer_backend) == "viser":
+        from viser_mujoco_viewer import run_viser_viewer
+
+        run_viser_viewer(
+            args=args,
+            model=model,
+            data=data,
+            frame_count=len(frame_ids),
+            fps=fps,
+            set_frame=set_frame,
+            source_overlay=smpl_point_overlay,
+            robot_overlay=None,
+            ground_overlay=None,
+            fixed_lookat=np.asarray([0.0, 0.0, 0.7], dtype=np.float64),
+            fixed_distance=max(float(args.camera_distance), spacing * max(2.5, 0.7 * len(entries))),
+            camera_lookat=lambda _frame: np.asarray([0.0, 0.0, 0.7], dtype=np.float64),
+            title="UMR Multi-Robot Retarget Viewer",
+        )
+        return
 
     set_frame(frame_cursor)
     held_seek = HeldSeekController(fps, args.seek_hold_speed)
@@ -3272,8 +3311,161 @@ def run_glfw_ui_viewer(
         glfw.terminate()
 
 
+
+def prepare_viser_result_clip(args, result_path: Path) -> dict:
+    """Load one result with the exact same preparation path as single-clip mode."""
+    # Preserve a symlink's selected name so it remains identical to the path
+    # shown by the batch-folder dropdown.
+    result_path = Path(result_path).expanduser().absolute()
+    result = None
+    object_tmp = None
+    try:
+        result, qpos_all, saved_robot_xml, saved_fps = load_result(result_path)
+        robot_xml = resolve_robot_xml_path(
+            args.robot_xml if args.robot_xml is not None else saved_robot_xml
+        )
+        if not robot_xml.exists():
+            raise FileNotFoundError(f"Robot XML not found: {robot_xml}")
+
+        start = max(0, int(args.start))
+        end = len(qpos_all) if int(args.end) < 0 else min(len(qpos_all), int(args.end))
+        frame_ids = np.arange(start, end, dtype=np.int32)
+        if frame_ids.size == 0:
+            raise ValueError(
+                f"No frames selected: total={len(qpos_all)}, start={start}, end={end}"
+            )
+
+        object_tmp = tempfile.TemporaryDirectory()
+        source_objects = prepare_source_objects(args, result, frame_ids, object_tmp.name)
+        load_robot_xml, patched_robot_xml_tmp = patch_legacy_xml_paths(
+            robot_xml,
+            source_objects,
+            float(args.source_object_alpha),
+        )
+        try:
+            model = mujoco.MjModel.from_xml_path(str(load_robot_xml))
+        finally:
+            if patched_robot_xml_tmp is not None:
+                Path(patched_robot_xml_tmp).unlink(missing_ok=True)
+        normalize_loaded_model_scene(model)
+        configure_collision_geom_rendering(args, model)
+        data = mujoco.MjData(model)
+        bind_source_object_freejoints(model, source_objects)
+        playback_qpos = expand_qpos_to_model(
+            qpos_all[frame_ids], model, "qpos", source_objects
+        )
+        fps = float(args.fps) if float(args.fps) > 0.0 else float(saved_fps)
+        robot_contact_geom_ids = remap_robot_contact_geom_ids(result, robot_xml, model)
+        robot_all_contact_geom_ids = remap_robot_contact_geom_ids(
+            result,
+            robot_xml,
+            model,
+            field="robot_all_contact_geom_ids",
+        )
+        source_overlay = prepare_source_slot_overlay(args, result, frame_ids)
+        robot_overlay = prepare_robot_slot_overlay(
+            args,
+            result,
+            robot_contact_geom_ids,
+            robot_all_contact_geom_ids,
+        )
+        ground_overlay = prepare_ground_contact_overlay(
+            args,
+            result,
+            frame_ids,
+            robot_contact_geom_ids,
+        )
+        fixed_lookat = fixed_camera_lookat(args, playback_qpos, source_overlay)
+        fixed_distance = fixed_camera_distance(
+            args, playback_qpos, source_overlay, fixed_lookat
+        )
+
+        def set_frame(idx: int) -> None:
+            data.qpos[:] = playback_qpos[idx]
+            apply_source_object_motion(data, source_objects, idx)
+            mujoco.mj_forward(model, data)
+
+        def camera_lookat(idx: int) -> np.ndarray | None:
+            return camera_frame_lookat(args, data, source_overlay, idx, fixed_lookat)
+
+        cleanup_lock = threading.Lock()
+        cleaned = False
+
+        def cleanup() -> None:
+            nonlocal cleaned
+            with cleanup_lock:
+                if cleaned:
+                    return
+                cleaned = True
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+                object_tmp.cleanup()
+
+        seq_key = scalar_string(result["source_sequence_key"]) if "source_sequence_key" in result else ""
+        print(
+            f"[{VIS_PREFIX}][Viser] result={result_path}, "
+            f"frames={len(playback_qpos)}/{len(qpos_all)}, fps={fps:.3f}"
+        )
+        print(
+            f"[{VIS_PREFIX}][Viser] xml={robot_xml}, model.nq={model.nq}, "
+            f"qpos_width={playback_qpos.shape[1]}"
+        )
+        if seq_key:
+            print(f"[{VIS_PREFIX}][Viser] seq={seq_key}")
+        return {
+            "path": result_path,
+            "model": model,
+            "data": data,
+            "frame_count": len(playback_qpos),
+            "fps": max(float(fps), 1e-6),
+            "set_frame": set_frame,
+            "source_overlay": source_overlay,
+            "robot_overlay": robot_overlay,
+            "ground_overlay": ground_overlay,
+            "fixed_lookat": fixed_lookat,
+            "fixed_distance": fixed_distance,
+            "camera_lookat": camera_lookat,
+            "cleanup": cleanup,
+        }
+    except Exception:
+        if result is not None:
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+        if object_tmp is not None:
+            object_tmp.cleanup()
+        raise
+
+
 def main():
     args = parse_args()
+    if args.result_dir is not None:
+        if bool(args.all):
+            raise ValueError("--result-dir cannot be combined with --all.")
+        if str(args.viewer_backend) != "viser":
+            raise ValueError("--result-dir is available only with --viewer-backend viser.")
+        if args.record_video is not None:
+            raise ValueError("--result-dir cannot be combined with --record-video.")
+        if bool(args.dry_run):
+            from viser_result_folder import scan_result_files
+
+            result_paths = scan_result_files(args.result_dir)
+            print(f"[{VIS_PREFIX}][Viser] folder={args.result_dir}, results={len(result_paths)}")
+            for result_path in result_paths:
+                print(result_path)
+            return
+        if bool(args.ghost_trail):
+            print(f"[{VIS_PREFIX}][Viser] ghost trail is GLFW-only and will be ignored.")
+        from viser_result_folder import run_viser_result_folder
+
+        run_viser_result_folder(
+            args=args,
+            result_dir=args.result_dir,
+            load_clip=lambda result_path: prepare_viser_result_clip(args, result_path),
+            title=str(args.viser_label),
+        )
+        return
     if bool(args.all):
         run_all_mode(args)
         return
@@ -3285,9 +3477,9 @@ def main():
 
     start = max(0, int(args.start))
     end = len(qpos_all) if int(args.end) < 0 else min(len(qpos_all), int(args.end))
-    frame_ids = np.arange(start, end, max(1, int(args.stride)), dtype=np.int32)
+    frame_ids = np.arange(start, end, dtype=np.int32)
     if frame_ids.size == 0:
-        raise ValueError(f"No frames selected: total={len(qpos_all)}, start={start}, end={end}, stride={args.stride}")
+        raise ValueError(f"No frames selected: total={len(qpos_all)}, start={start}, end={end}")
 
     object_tmp = tempfile.TemporaryDirectory()
     source_objects = prepare_source_objects(args, result, frame_ids, object_tmp.name)
@@ -3307,7 +3499,7 @@ def main():
     data = mujoco.MjData(model)
     bind_source_object_freejoints(model, source_objects)
     playback_qpos = expand_qpos_to_model(qpos_all[frame_ids], model, "qpos", source_objects)
-    fps = float(args.fps) if float(args.fps) > 0.0 else saved_fps / max(1, int(args.stride))
+    fps = float(args.fps) if float(args.fps) > 0.0 else saved_fps
     dt = 1.0 / max(fps, 1e-6)
     robot_contact_geom_ids = remap_robot_contact_geom_ids(result, robot_xml, model)
     robot_all_contact_geom_ids = remap_robot_contact_geom_ids(
@@ -3317,11 +3509,6 @@ def main():
         field="robot_all_contact_geom_ids",
     )
     overlay_args = args
-    if str(args.viewer_backend) == "glfw-ui":
-        overlay_args = copy.copy(args)
-        overlay_args.show_source_slots = False
-        overlay_args.show_robot_slots = False
-        overlay_args.show_ground_contact_map = False
     source_overlay = prepare_source_slot_overlay(overlay_args, result, frame_ids)
     robot_overlay = prepare_robot_slot_overlay(
         overlay_args,
@@ -3353,6 +3540,39 @@ def main():
 
     fixed_lookat = fixed_camera_lookat(args, playback_qpos, source_overlay)
     fixed_distance = fixed_camera_distance(args, playback_qpos, source_overlay, fixed_lookat)
+    if str(args.viewer_backend) == "viser":
+        from viser_mujoco_viewer import run_viser_viewer
+
+        def set_viser_frame(idx: int) -> None:
+            data.qpos[:] = playback_qpos[idx]
+            apply_source_object_motion(data, source_objects, idx)
+            mujoco.mj_forward(model, data)
+
+        def viser_camera_lookat(idx: int) -> np.ndarray | None:
+            return camera_frame_lookat(args, data, source_overlay, idx, fixed_lookat)
+
+        if bool(args.ghost_trail):
+            print(f"[{VIS_PREFIX}][Viser] ghost trail is GLFW-only and will be ignored.")
+        try:
+            run_viser_viewer(
+                args=args,
+                model=model,
+                data=data,
+                frame_count=len(playback_qpos),
+                fps=fps,
+                set_frame=set_viser_frame,
+                source_overlay=source_overlay,
+                robot_overlay=robot_overlay,
+                ground_overlay=ground_overlay,
+                fixed_lookat=fixed_lookat,
+                fixed_distance=fixed_distance,
+                camera_lookat=viser_camera_lookat,
+                title=str(args.viser_label),
+            )
+        finally:
+            object_tmp.cleanup()
+        return
+
     if str(args.viewer_backend) == "glfw-ui":
         try:
             run_glfw_ui_viewer(
