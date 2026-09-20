@@ -1,0 +1,15 @@
+<mujoco model="table_2">
+ <compiler angle="radian" meshdir="meshes" />
+ <asset>
+  <mesh name="table_2_visual" file="table_2_visual.obj" />
+  <mesh name="table_2_hull" file="table_2_hull.obj" />
+ </asset>
+ <worldbody>
+  <body name="table_2" pos="0 0 0">
+   <freejoint name="table_2_freejoint" />
+   <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01" />
+   <geom name="table_2_visual" type="mesh" mesh="table_2_visual" group="2" contype="0" conaffinity="0" rgba="0.72 0.7 0.66 1" />
+   <geom name="table_2_hull" type="mesh" mesh="table_2_hull" group="3" contype="1" conaffinity="1" />
+  </body>
+ </worldbody>
+</mujoco>

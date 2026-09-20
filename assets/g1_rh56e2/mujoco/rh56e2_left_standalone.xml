@@ -1,0 +1,97 @@
+<mujoco model="rh56e2_left_standalone">
+  <!-- Left RH56E2 hand only, base fixed to the world - for fast iteration
+       on tactile-pad/contact tuning without the full G1 body's ragdoll
+       physics (scenes.ground()'s robot collapses under gravity with no
+       standing controller active, which was masking whether the hand
+       itself was actually making contact with anything - see
+       sim/mujoco/hand_bridge.py's docstring history).
+
+       Same prefix scheme (l_rh_) as g1_29dof_rh56e2.xml's own attach of
+       this same rh56e2_left.xml, so HandBridge (sim/mujoco/hand_bridge.py)
+       works completely unmodified against this model - just point
+       G1_RH56E2_LEFT_STANDALONE at this file. -->
+  <compiler angle="radian"/>
+
+  <asset>
+    <texture name="groundplane" type="2d" builtin="checker" mark="edge"
+      rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+    <!-- Whole model, attached in the worldbody - same pattern as
+         g1_29dof_rh56e2.xml's own attach of this same file. -->
+    <model name="rh56e2_left" file="rh56e2_left.xml"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" type="directional"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane" pos="0 0 -0.1"/>
+
+    <!-- Hand hangs fingers-down from a fixed mount, roughly wrist height
+         above the floor - flipped 180 so the flange's "+z down the hand"
+         convention (see rh56e2_left.xml's own docstring) points -Z (down)
+         instead of up. Adjust pos/quat freely - this is just a starting
+         pose to iterate from. -->
+    <body name="l_rh_mount" pos="0 0 0.3" quat="0 0 -0.707107 0.707107">
+      <attach model="rh56e2_left" body="flange" prefix="l_rh_"/>
+    </body>
+
+    <!-- Graspable cylinder for tactile-pad testing: a small marker-pen-sized
+         rod (12mm radius). Position is NOT the open hand's resting spot -
+         verified via pure-FK sweep (mj_kinematics, no contact/dynamics) of
+         the 4 finger joints from open to closed that the *_force_sensor_2
+         pad sites travel mostly in +X as they curl (x: ~0.01 open ->
+         ~0.07 closed, z: ~0.08 open -> ~0.145 closed), NOT straight up in Z
+         - an earlier placement near the open-pose xz sat right where the
+         fingers already are and jammed on contact at frac=0 instead of
+         sweeping in. x=0.05/z=0.11 sits clear of the open pose and inside
+         the ~50-75%-closed sweep band.
+
+         Free (<freejoint/>) but gravcomp="1" -- a body-local force exactly
+         cancels this body's own weight every step, without touching the
+         scene's global gravity (which would also zero-out the hand's own
+         weight/dynamics). So it never drifts or falls on its own, but is
+         otherwise a real 6-DOF rigid body: a grasp command has to actually
+         hold it via contact/friction, and once picked up it moves and can
+         be dropped like a real held object, not just tested in place like
+         the earlier fixed-body version. -->
+    <body name="test_cylinder" pos="-0.05 -0.14 0.3" quat="0 0 -0.707107 0.707107" gravcomp="1">
+      <freejoint/>
+      <geom name="test_cylinder" type="cylinder" fromto="0 -0.045 0 0 0.035 0" size="0.03"
+        rgba="0.9 0.3 0.1 1" friction="1.0 0.005 0.0001"/>
+    </body>
+
+    <!-- Small fingertip-scale probe (4mm radius), separate from
+         test_cylinder -- for validating which exact touch cell lights up.
+         test_cylinder (30mm radius, 80mm long) is comparable in size to an
+         entire pad (some pads are only ~10-50mm across), so it always
+         contacts a wide area regardless of collision/kernel accuracy;
+         test_probe is small enough that a single touch actually localizes
+         to a handful of cells, matching a real fingertip touch.
+
+         The visible sphere remains a genuine dynamic free body so it can
+         collide with the fixed-base hand. A separate, geometry-free mocap
+         target drives it through a compliant weld (declared below): using
+         a mocap body AS the colliding probe did not work because MuJoCo
+         prunes collision between two fully static bodies, while repeatedly
+         teleporting the old 0.27-gram free sphere produced tiny transient
+         constraint forces and let it bounce between publish samples.
+
+         The explicit 50g mass is stylus-like and gives the contact solver
+         meaningful effective inertia; default-density mass for a 4mm
+         sphere is only 0.000268kg. Started 100mm away in +X from
+         test_cylinder so the two don't spawn overlapping. -->
+    <body name="test_probe_target" mocap="true" pos="0.05 -0.14 0.3"/>
+    <body name="test_probe" pos="0.05 -0.14 0.3" gravcomp="1">
+      <freejoint/>
+      <geom name="test_probe" type="sphere" size="0.004" mass="0.05"
+        rgba="0.2 0.6 0.9 1" friction="1.0 0.005 0.0001"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <!-- Stiff enough to hold a deliberate surface indentation, compliant
+         enough to avoid an infinite-force hard kinematic constraint. -->
+    <weld name="test_probe_driver" body1="test_probe_target" body2="test_probe"
+      solref="0.03 1" solimp="0.9 0.95 0.001"/>
+  </equality>
+</mujoco>

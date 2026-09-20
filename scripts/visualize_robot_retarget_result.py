@@ -465,6 +465,18 @@ def normalize_patched_asset_paths(xml_text: str, xml_path: Path) -> str:
         else:
             target = resolve_relative_xml_path(file_path, xml_path)
         texture.set("file", Path(os.path.relpath(target, start=ROOT)).as_posix())
+    # <model file=...> and <include file=...> resolve relative to the INCLUDING file, and the
+    # patched copy is written at the repository root rather than beside the original. Without
+    # rewriting them a composed robot -- the G1 with Inspire hands attaches its two hand MJCFs
+    # this way -- fails to load at all.
+    for tag in ("model", "include"):
+        for node in root.iter(tag):
+            file_text = node.get("file")
+            if not file_text:
+                continue
+            file_path = Path(file_text)
+            target = file_path if file_path.is_absolute() else resolve_relative_xml_path(file_path, xml_path)
+            node.set("file", Path(os.path.relpath(target, start=ROOT)).as_posix())
     if compiler is not None:
         compiler.attrib.pop("meshdir", None)
         compiler.attrib.pop("texturedir", None)
@@ -878,6 +890,8 @@ def xml_object_fragments(xml_path: Path, object_id: int, role: str, alpha: float
 
 
 def load_noitom_prop_motion(prop_csv: Path, source_frame_ids, result, output_up, convert_y_up, ground_align, floor_y, ground_offset, smpl_scale, offset):
+    """Object poses for playback. ``smpl_scale`` is a scalar or a per-axis 3-vector, because a
+    retarget may shrink the scene's floor plan without touching heights."""
     with prop_csv.open("r", newline="", errors="replace") as f:
         rows = list(csv.DictReader(f))
     required = {"px", "py", "pz", "qx", "qy", "qz", "qw"}
@@ -898,7 +912,10 @@ def load_noitom_prop_motion(prop_csv: Path, source_frame_ids, result, output_up,
         floor_y,
         ground_offset,
     )
-    positions = positions * float(smpl_scale) + np.asarray(offset, dtype=np.float32)[None, :]
+    position_scale = np.asarray(smpl_scale, dtype=np.float32).reshape(-1)
+    if position_scale.size == 1:
+        position_scale = np.repeat(position_scale, 3)
+    positions = positions * position_scale[None, :] + np.asarray(offset, dtype=np.float32)[None, :]
 
     basis = y_up_to_z_up_matrix(output_up, convert_y_up)
     rot_mats = R.from_quat(quats_xyzw[clipped]).as_matrix()
@@ -962,16 +979,36 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
         object_ground_align = False
         object_floor_y = 0.0
         object_ground_offset = 0.0
-        object_scale = 1.0
+        object_mesh_scale = 1.0
+        object_position_scale = np.ones(3, dtype=np.float32)
+        object_position_offset = np.zeros(3, dtype=np.float32)
     else:
         object_output_up = output_up
         object_convert_y_up = convert_y_up
         object_ground_align = ground_align
         object_floor_y = floor_y
         object_ground_offset = ground_offset
-        object_scale = smpl_scale
-    source_offset = np.asarray(args.source_object_offset if args.source_object_offset is not None else args.source_slot_offset, dtype=np.float32)
-    robot_offset = np.asarray(args.robot_object_offset, dtype=np.float32)
+        # The solver records the mesh scale and the trajectory scale it actually used; they are
+        # equal under retarget_object_size="scaled" but not under "original" (real mesh, scaled
+        # trajectory) or "real" (both untouched). Reading them is what makes the viewer show the
+        # scene the solve was done against. Older results carry neither and get smpl_scale.
+        object_mesh_scale = float(
+            np.asarray(result["object_mesh_scale"]).reshape(-1)[0]
+        ) if "object_mesh_scale" in result else smpl_scale
+        object_position_scale = (
+            np.asarray(result["object_position_scale"], dtype=np.float32).reshape(-1)
+            if "object_position_scale" in result
+            else np.full(3, smpl_scale, dtype=np.float32)
+        )
+        # A retarget may also translate the scene, when the floor plan is scaled about the scene's
+        # own centre rather than the world origin. Both are recorded; neither is re-derived here.
+        object_position_offset = (
+            np.asarray(result["object_position_offset"], dtype=np.float32).reshape(-1)
+            if "object_position_offset" in result
+            else np.zeros(3, dtype=np.float32)
+        )
+    source_offset = np.asarray(args.source_object_offset if args.source_object_offset is not None else args.source_slot_offset, dtype=np.float32) + object_position_offset
+    robot_offset = np.asarray(args.robot_object_offset, dtype=np.float32) + object_position_offset
     source_frame_ids_all = (
         np.asarray(result["frame_ids"], dtype=np.int32)
         if "frame_ids" in result
@@ -1006,7 +1043,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
             object_ground_align,
             object_floor_y,
             object_ground_offset,
-            object_scale,
+            object_position_scale,
             source_offset,
         )
         robot_motion = load_noitom_prop_motion(
@@ -1018,7 +1055,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
             object_ground_align,
             object_floor_y,
             object_ground_offset,
-            object_scale,
+            object_position_scale,
             robot_offset,
         )
         if source_motion is None or robot_motion is None:
@@ -1039,7 +1076,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
                     object_id,
                     role,
                     args.source_object_alpha,
-                    object_scale,
+                    object_mesh_scale,
                 )
                 objects.append({
                     **base,
@@ -1057,7 +1094,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
                     converted_path,
                     object_output_up,
                     object_convert_y_up,
-                    float(args.source_object_scale) * object_scale,
+                    float(args.source_object_scale) * object_mesh_scale,
                 )
                 info["prefix"] = f"source_object_{object_id}_{role}_{stem}"
                 objects.append({
@@ -1076,7 +1113,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
                     object_id,
                     role,
                     args.source_object_alpha,
-                    object_scale,
+                    object_mesh_scale,
                 )
                 objects.append({
                     **base,
@@ -1094,7 +1131,7 @@ def prepare_source_objects(args, result, playback_frame_ids: np.ndarray, temp_di
                     converted_path,
                     object_output_up,
                     object_convert_y_up,
-                    float(args.source_object_scale) * object_scale,
+                    float(args.source_object_scale) * object_mesh_scale,
                 )
                 info["prefix"] = f"source_object_{object_id}_{role}_{stem}"
                 objects.append({
@@ -1165,6 +1202,25 @@ def add_source_objects_to_xml(xml_text: str, objects, alpha: float) -> str:
                 },
             )
     return ET.tostring(root, encoding="unicode")
+
+
+def _mjv_move_camera_takes_scene() -> bool:
+    """MuJoCo 3.13 dropped the ``scn`` argument from ``mjv_moveCamera``; 3.3 still requires it."""
+    try:
+        return "scn:" in (mujoco.mjv_moveCamera.__doc__ or "")
+    except Exception:
+        return True
+
+
+MJV_MOVE_CAMERA_TAKES_SCENE = _mjv_move_camera_takes_scene()
+
+
+def move_camera(model, action, reldx, reldy, scene, cam) -> None:
+    """Drag/zoom the camera, with either MuJoCo calling convention."""
+    if MJV_MOVE_CAMERA_TAKES_SCENE:
+        mujoco.mjv_moveCamera(model, action, reldx, reldy, scene, cam)
+    else:
+        mujoco.mjv_moveCamera(model, action, reldx, reldy, cam)
 
 
 def patch_legacy_xml_paths(xml_path: Path, source_objects=None, source_object_alpha: float = 1.0) -> tuple[Path, str | None]:
@@ -3103,14 +3159,14 @@ def run_glfw_ui_viewer(
             action = mujoco.mjtMouse.mjMOUSE_ROTATE_H if shift else mujoco.mjtMouse.mjMOUSE_ROTATE_V
         else:
             action = mujoco.mjtMouse.mjMOUSE_ZOOM
-        mujoco.mjv_moveCamera(model, action, dx / max(1, height), dy / max(1, height), scene, cam)
+        move_camera(model, action, dx / max(1, height), dy / max(1, height), scene, cam)
 
     def scroll_callback(window, xoffset, yoffset):
         del xoffset
         x_fb, y_fb = framebuffer_mouse_pos(glfw, window)
         if panel_contains(x_fb, y_fb):
             return
-        mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0.0, -0.05 * float(yoffset), scene, cam)
+        move_camera(model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0.0, -0.05 * float(yoffset), scene, cam)
 
     def key_callback(window, key, scancode, action, mods):
         del window, scancode

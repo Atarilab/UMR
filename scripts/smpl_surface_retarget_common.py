@@ -1042,6 +1042,36 @@ def build_robot_self_penetration_cache(model, args):
         if int(model.geom_contype[geom_id]) == 0 and int(model.geom_conaffinity[geom_id]) == 0:
             continue
         robot_geoms.append(int(geom_id))
+    # Some robot models overlap themselves while just standing there: on the G1 each ankle_roll
+    # link sits 20 mm inside its own knee link. Those pairs are a property of the description, not
+    # of the motion, and no pose can separate them, so asking the solver to try would distort every
+    # frame. Detect them once at the neutral pose and exclude them by geom id, which needs no
+    # knowledge of the robot's naming.
+    neutral = np.zeros(model.nq, dtype=np.float64)
+    for joint_id in range(model.njnt):
+        if int(model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE):
+            neutral[int(model.jnt_qposadr[joint_id]) + 3] = 1.0
+    scratch = mujoco.MjData(model)
+    scratch.qpos[:] = neutral
+    mujoco.mj_forward(model, scratch)
+    mujoco.mj_collision(model, scratch)
+    robot_geom_set = {int(geom_id) for geom_id in robot_geoms}
+    excluded_pairs = set()
+    for contact_id in range(scratch.ncon):
+        contact = scratch.contact[contact_id]
+        geom1, geom2 = int(contact.geom1), int(contact.geom2)
+        if geom1 in robot_geom_set and geom2 in robot_geom_set and float(contact.dist) < 0.0:
+            excluded_pairs.add((min(geom1, geom2), max(geom1, geom2)))
+    if excluded_pairs:
+        names = ", ".join(
+            f"{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[a])) or a}"
+            f"~{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[b])) or b}"
+            for a, b in sorted(excluded_pairs)
+        )
+        print(
+            f"[SurfaceRetarget][RobotSelfPenetration] excluding {len(excluded_pairs)} geom pairs that "
+            f"already overlap at the neutral pose: {names}"
+        )
     print(
         f"[SurfaceRetarget][RobotSelfPenetration] cost={float(args.robot_self_penetration_cost):.4f}, "
         f"hard_constraint={hard_enabled}, "
@@ -1054,6 +1084,7 @@ def build_robot_self_penetration_cache(model, args):
     return {
         "geom_ids": np.asarray(robot_geoms, dtype=np.int32),
         "labels": labels,
+        "excluded_pairs": excluded_pairs,
     }
 
 
@@ -1147,6 +1178,7 @@ def compute_robot_self_penetration_rows(model, data, cache, collision_threshold)
                 candidates.add((min(geom1, geom2), max(geom1, geom2)))
     finally:
         model.geom_margin[:] = saved_margin
+    candidates -= set(cache.get("excluded_pairs", ()))
 
     jacobians = []
     distances = []
@@ -1315,42 +1347,35 @@ def _finite_difference_matrix(length: int, order: int):
     return sparse.diags(diagonals, offsets=np.arange(order + 1), shape=(rows, length), format="csc")
 
 
-def lqr_smooth_qpos_sequence(
-    model,
-    qpos_seq,
-    qpos_columns,
-    joint_limits_by_qpos=None,
+def smooth_trajectory_lqr(
+    values,
     data_cost=1.0,
     velocity_cost=0.0,
     acceleration_cost=0.0,
     jerk_cost=0.0,
-    include_root_translation=False,
     anchor_start_frames=0,
     anchor_end_frames=0,
 ):
-    """LQR-style fixed-interval smoother for retargeted qpos trajectories."""
-    qpos = np.asarray(qpos_seq, dtype=np.float64)
-    if qpos.ndim != 2:
-        raise ValueError(f"qpos_seq must be 2D, got {qpos.shape}")
-    filtered = qpos.copy()
-    frames = int(filtered.shape[0])
-    if frames <= 1:
-        return filtered
+    """Least-squares fixed-interval smoother for a ``(frames, channels)`` trajectory.
+
+    Minimises ``data_cost * ||x - x_raw||^2`` plus the first/second/third finite-difference
+    energies. Shared by the retargeted-qpos filter below and by the HSI/HOI source-warp anchor,
+    so both express "smooth this trajectory" with one implementation.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2:
+        raise ValueError(f"values must be 2D, got {values.shape}")
+    smoothed = values.copy()
+    frames = int(smoothed.shape[0])
+    if frames <= 1 or smoothed.shape[1] == 0:
+        return smoothed
 
     data_cost = max(float(data_cost), 1e-12)
     velocity_cost = max(float(velocity_cost), 0.0)
     acceleration_cost = max(float(acceleration_cost), 0.0)
     jerk_cost = max(float(jerk_cost), 0.0)
     if velocity_cost <= 0.0 and acceleration_cost <= 0.0 and jerk_cost <= 0.0:
-        return filtered
-
-    columns = []
-    if include_root_translation:
-        columns.extend([0, 1, 2])
-    columns.extend(int(col) for col in qpos_columns)
-    columns = sorted({col for col in columns if 0 <= col < filtered.shape[1]})
-    if not columns:
-        return filtered
+        return smoothed
 
     system = data_cost * sparse.eye(frames, dtype=np.float64, format="csc")
     if velocity_cost > 0.0 and frames > 1:
@@ -1363,7 +1388,7 @@ def lqr_smooth_qpos_sequence(
         diff = _finite_difference_matrix(frames, 3)
         system = system + jerk_cost * (diff.T @ diff)
 
-    rhs = data_cost * filtered[:, columns]
+    rhs = data_cost * smoothed
     anchor_start_frames = max(int(anchor_start_frames), 0)
     anchor_end_frames = max(int(anchor_end_frames), 0)
     fixed = []
@@ -1377,21 +1402,99 @@ def lqr_smooth_qpos_sequence(
         free_mask = np.ones(frames, dtype=bool)
         free_mask[fixed] = False
         free = np.flatnonzero(free_mask).astype(np.int32)
-        filtered[fixed[:, None], columns] = qpos[fixed[:, None], columns]
+        smoothed[fixed] = values[fixed]
         if free.size:
             system_csc = system.tocsc()
-            rhs_free = rhs[free] - system_csc[free][:, fixed] @ qpos[fixed[:, None], columns]
+            rhs_free = rhs[free] - system_csc[free][:, fixed] @ values[fixed]
             solved = sparse_linalg.spsolve(system_csc[free][:, free], rhs_free)
             solved = np.asarray(solved, dtype=np.float64)
             if solved.ndim == 1:
                 solved = solved.reshape(free.size, 1)
-            filtered[free[:, None], columns] = solved
+            smoothed[free] = solved
     else:
         solved = sparse_linalg.spsolve(system.tocsc(), rhs)
         solved = np.asarray(solved, dtype=np.float64)
         if solved.ndim == 1:
             solved = solved.reshape(frames, 1)
-        filtered[:, columns] = solved
+        smoothed[:] = solved
+    return smoothed
+
+
+def lqr_smooth_qpos_sequence(
+    model,
+    qpos_seq,
+    qpos_columns,
+    joint_limits_by_qpos=None,
+    data_cost=1.0,
+    velocity_cost=0.0,
+    acceleration_cost=0.0,
+    jerk_cost=0.0,
+    include_root_translation=False,
+    anchor_start_frames=0,
+    anchor_end_frames=0,
+    include_root_rotation=False,
+):
+    """LQR-style fixed-interval smoother for retargeted qpos trajectories.
+
+    ``include_root_rotation`` also filters the free joint's quaternion. The four components are
+    smoothed as ordinary columns and renormalised, which is valid because consecutive frames are
+    close at motion-capture rates; the sign of each quaternion is aligned to its predecessor first,
+    since q and -q are the same rotation and a flip would otherwise be smoothed as a real rotation.
+    """
+    qpos = np.asarray(qpos_seq, dtype=np.float64)
+    if qpos.ndim != 2:
+        raise ValueError(f"qpos_seq must be 2D, got {qpos.shape}")
+    filtered = qpos.copy()
+    frames = int(filtered.shape[0])
+    if frames <= 1:
+        return filtered
+
+    if (
+        max(float(velocity_cost), 0.0) <= 0.0
+        and max(float(acceleration_cost), 0.0) <= 0.0
+        and max(float(jerk_cost), 0.0) <= 0.0
+    ):
+        return filtered
+
+    if include_root_rotation and filtered.shape[1] >= 7:
+        aligned = np.asarray(qpos[:, 3:7], dtype=np.float64).copy()
+        for frame_idx in range(1, frames):
+            if float(np.dot(aligned[frame_idx], aligned[frame_idx - 1])) < 0.0:
+                aligned[frame_idx] = -aligned[frame_idx]
+        smoothed_quat = smooth_trajectory_lqr(
+            aligned,
+            data_cost=data_cost,
+            velocity_cost=velocity_cost,
+            acceleration_cost=acceleration_cost,
+            jerk_cost=jerk_cost,
+            anchor_start_frames=anchor_start_frames,
+            anchor_end_frames=anchor_end_frames,
+        )
+        norms = np.maximum(np.linalg.norm(smoothed_quat, axis=1, keepdims=True), 1e-12)
+        filtered[:, 3:7] = smoothed_quat / norms
+
+    columns = []
+    if include_root_translation:
+        columns.extend([0, 1, 2])
+    columns.extend(int(col) for col in qpos_columns)
+    columns = sorted({col for col in columns if 0 <= col < filtered.shape[1]})
+    if not columns:
+        if include_root_rotation and filtered.shape[1] >= 7:
+            for frame_idx in range(frames):
+                filtered[frame_idx] = clamp_joint_ranges(
+                    model, filtered[frame_idx], joint_limits_by_qpos=joint_limits_by_qpos
+                )
+        return filtered
+
+    filtered[:, columns] = smooth_trajectory_lqr(
+        qpos[:, columns],
+        data_cost=data_cost,
+        velocity_cost=velocity_cost,
+        acceleration_cost=acceleration_cost,
+        jerk_cost=jerk_cost,
+        anchor_start_frames=anchor_start_frames,
+        anchor_end_frames=anchor_end_frames,
+    )
     for frame_idx in range(frames):
         filtered[frame_idx] = clamp_joint_ranges(model, filtered[frame_idx], joint_limits_by_qpos=joint_limits_by_qpos)
     return filtered

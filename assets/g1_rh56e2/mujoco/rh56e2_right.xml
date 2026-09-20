@@ -1,0 +1,420 @@
+<mujoco model="rh56e2_right">
+  <!-- Inspire RH56E2 right hand, generated from
+       rh56e2_urdf/urdf/rh56e2_right.urdf (SolidWorks export "RH56E2_R_2025_9_11").
+       Link frames, joint axes, limits, mimic ratios and link inertias are the
+       URDF's; the tactile pads, collision proxies and drive limits are added
+       here.  URDF names are kept except "little" -> "pinky", which is what the
+       rest of this repo (rh56e2_hands.py, rh56e2_sysid.py) already calls it.
+
+       Frames: the URDF root link is the wrist adapter, with -z pointing down
+       the hand.  "flange" re-exposes it with +z down the hand, which is the
+       frame the future G1 assembly should mount against, matching the
+       previous hand model convention.  That adapter is the part those models drew
+       as a separate ft_sensor mesh; here it is base_link, so it is not drawn
+       twice. -->
+  <compiler angle="radian" meshdir="meshes/inspire_rh56e2"/>
+
+  <default>
+    <default class="finger_motor">
+      <joint damping="0.02" armature="0.005" frictionloss="0.05"/>
+    </default>
+    <default class="visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"/>
+    </default>
+    <default class="collision">
+      <geom type="mesh" group="3" rgba="0.4 0.5 0.9 0.3"/>
+    </default>
+    <default class="pad">
+      <site type="box" group="4" rgba="0.9 0.3 0.1 0.35"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="shell" rgba="0.85 0.85 0.85 1" specular="0.6" shininess="0.5"/>
+    <material name="body" rgba="0.25 0.25 0.25 1" specular="0.25" shininess="0.25"/>
+    <!-- the pads are the same rubber as the fingers -->
+    <material name="pad" rgba="0.25 0.25 0.25 1" specular="0.25" shininess="0.25"/>
+
+    <mesh name="base_link" file="right/base_link.STL" maxhullvert="48"/>
+    <mesh name="palm_1" file="right/right_palm_1.STL" maxhullvert="48"/>
+    <mesh name="palm_2" file="right/right_palm_2.STL" maxhullvert="48"/>
+    <mesh name="palm_force_sensor" file="right/right_palm_force_sensor.STL"/>
+    <mesh name="palm_col0" file="right/collision/palm_col0.obj"/>
+    <mesh name="palm_col1" file="right/collision/palm_col1.obj"/>
+    <mesh name="palm_col2" file="right/collision/palm_col2.obj"/>
+    <mesh name="palm_col3" file="right/collision/palm_col3.obj"/>
+    <mesh name="palm_col4" file="right/collision/palm_col4.obj"/>
+    <mesh name="palm_col5" file="right/collision/palm_col5.obj"/>
+    <mesh name="palm_col6" file="right/collision/palm_col6.obj"/>
+    <mesh name="palm_col7" file="right/collision/palm_col7.obj"/>
+    <mesh name="palm_col8" file="right/collision/palm_col8.obj"/>
+    <mesh name="palm_col9" file="right/collision/palm_col9.obj"/>
+    <mesh name="palm_col10" file="right/collision/palm_col10.obj"/>
+    <mesh name="palm_col11" file="right/collision/palm_col11.obj"/>
+    <mesh name="palm_col12" file="right/collision/palm_col12.obj"/>
+    <mesh name="palm_col13" file="right/collision/palm_col13.obj"/>
+    <mesh name="thumb_1" file="right/right_thumb_1.STL" maxhullvert="48"/>
+    <mesh name="thumb_2" file="right/right_thumb_2.STL" maxhullvert="48"/>
+    <mesh name="thumb_force_sensor_1" file="right/right_thumb_force_sensor_1.STL"/>
+    <mesh name="thumb_2_col0" file="right/collision/thumb_2_col0.obj"/>
+    <mesh name="thumb_2_col1" file="right/collision/thumb_2_col1.obj"/>
+    <mesh name="thumb_2_col2" file="right/collision/thumb_2_col2.obj"/>
+    <mesh name="thumb_2_col3" file="right/collision/thumb_2_col3.obj"/>
+    <mesh name="thumb_2_col4" file="right/collision/thumb_2_col4.obj"/>
+    <mesh name="thumb_2_col5" file="right/collision/thumb_2_col5.obj"/>
+    <mesh name="thumb_2_col6" file="right/collision/thumb_2_col6.obj"/>
+    <mesh name="thumb_2_col7" file="right/collision/thumb_2_col7.obj"/>
+    <mesh name="thumb_3" file="right/right_thumb_3.STL" maxhullvert="48"/>
+    <mesh name="thumb_force_sensor_2" file="right/right_thumb_force_sensor_2.STL"/>
+    <mesh name="thumb_3_col0" file="right/collision/thumb_3_col0.obj"/>
+    <mesh name="thumb_3_col1" file="right/collision/thumb_3_col1.obj"/>
+    <mesh name="thumb_3_col2" file="right/collision/thumb_3_col2.obj"/>
+    <mesh name="thumb_3_col3" file="right/collision/thumb_3_col3.obj"/>
+    <mesh name="thumb_3_col4" file="right/collision/thumb_3_col4.obj"/>
+    <mesh name="thumb_3_col5" file="right/collision/thumb_3_col5.obj"/>
+    <mesh name="thumb_4" file="right/right_thumb_4.STL" maxhullvert="48"/>
+    <mesh name="thumb_force_sensor_3" file="right/right_thumb_force_sensor_3.STL"/>
+    <mesh name="thumb_force_sensor_4" file="right/right_thumb_force_sensor_4.STL"/>
+    <mesh name="index_1" file="right/right_index_1.STL" maxhullvert="48"/>
+    <mesh name="index_force_sensor_1" file="right/right_index_force_sensor_1.STL"/>
+    <mesh name="proximal_col0" file="right/collision/proximal_col0.obj"/>
+    <mesh name="proximal_col1" file="right/collision/proximal_col1.obj"/>
+    <mesh name="proximal_col2" file="right/collision/proximal_col2.obj"/>
+    <mesh name="proximal_col3" file="right/collision/proximal_col3.obj"/>
+    <mesh name="proximal_col4" file="right/collision/proximal_col4.obj"/>
+    <mesh name="proximal_col5" file="right/collision/proximal_col5.obj"/>
+    <mesh name="index_2" file="right/right_index_2.STL" maxhullvert="48"/>
+    <mesh name="index_force_sensor_2" file="right/right_index_force_sensor_2.STL"/>
+    <mesh name="index_force_sensor_3" file="right/right_index_force_sensor_3.STL"/>
+    <mesh name="middle_1" file="right/right_middle_1.STL" maxhullvert="48"/>
+    <mesh name="middle_force_sensor_1" file="right/right_middle_force_sensor_1.STL"/>
+    <mesh name="middle_2" file="right/right_middle_2.STL" maxhullvert="48"/>
+    <mesh name="middle_force_sensor_2" file="right/right_middle_force_sensor_2.STL"/>
+    <mesh name="middle_force_sensor_3" file="right/right_middle_force_sensor_3.STL"/>
+    <mesh name="ring_1" file="right/right_ring_1.STL" maxhullvert="48"/>
+    <mesh name="ring_force_sensor_1" file="right/right_ring_force_sensor_1.STL"/>
+    <mesh name="ring_2" file="right/right_ring_2.STL" maxhullvert="48"/>
+    <mesh name="ring_force_sensor_2" file="right/right_ring_force_sensor_2.STL"/>
+    <mesh name="ring_force_sensor_3" file="right/right_ring_force_sensor_3.STL"/>
+    <mesh name="pinky_1" file="right/right_little_1.STL" maxhullvert="48"/>
+    <mesh name="pinky_force_sensor_1" file="right/right_little_force_sensor_1.STL"/>
+    <mesh name="pinky_2" file="right/right_little_2.STL" maxhullvert="48"/>
+    <mesh name="pinky_force_sensor_2" file="right/right_little_force_sensor_2.STL"/>
+    <mesh name="pinky_force_sensor_3" file="right/right_little_force_sensor_3.STL"/>
+  </asset>
+
+  <worldbody>
+    <!-- naming/orientation frame only; the adapter's mass and geometry sit on
+         hand_base, which is welded to it -->
+    <body name="flange" pos="0 0 0">
+      <body name="right_hand_base" pos="0 0 0" quat="0 1 0 0">
+        <inertial pos="-0.00583148 -0.00173049 -0.0855243" mass="0.49673"
+          fullinertia="0.00109629 0.000949292 0.000289441 4.03844e-06 -8.24145e-05 -2.30925e-06"/>
+        <geom class="visual" material="shell" mesh="base_link"/>
+        <geom class="visual" material="body" mesh="palm_1" pos="0 0 -0.0305" quat="3.6732051e-06 -1 0 0"/>
+        <geom class="visual" material="shell" mesh="palm_2" pos="0 0 -0.0305" quat="3.6732051e-06 -1 0 0"/>
+        <geom class="visual" material="pad" mesh="palm_force_sensor" pos="0.012296 -0.000367535 -0.119601" quat="0.500001837 -0.499996327 0.500001837 -0.5"/>
+        <geom class="collision" mesh="palm_col0"/>
+        <geom class="collision" mesh="palm_col1"/>
+        <geom class="collision" mesh="palm_col2"/>
+        <geom class="collision" mesh="palm_col3"/>
+        <geom class="collision" mesh="palm_col4"/>
+        <geom class="collision" mesh="palm_col5"/>
+        <geom class="collision" mesh="palm_col6"/>
+        <geom class="collision" mesh="palm_col7"/>
+        <geom class="collision" mesh="palm_col8"/>
+        <geom class="collision" mesh="palm_col9"/>
+        <geom class="collision" mesh="palm_col10"/>
+        <geom class="collision" mesh="palm_col11"/>
+        <geom class="collision" mesh="palm_col12"/>
+        <geom class="collision" mesh="palm_col13"/>
+        <site name="palm_force_sensor" class="pad" pos="0.0117307 -0.000448739 -0.120229" quat="0.500001837 -0.499996327 0.500001837 -0.5" size="0.024995 0.015037 0.004"/>
+        <site name="eef" pos="0.0006 -0.017 -0.137" size="0.005" group="4" rgba="1 0 0 0.4"/>
+        <body name="right_thumb_1" pos="0.02101 -0.0269 -0.0826" quat="3.6732051e-06 1 0 0">
+          <inertial pos="0.00067 0.00494 -0.00671" mass="0.01537"
+            fullinertia="9.7931e-07 6.7354e-07 8.6359e-07 -6.197e-08 -4.9e-09 -3.629e-08"/>
+          <joint name="right_thumb_joint1" axis="0 0 -1" range="0 1.658" actuatorfrcrange="-3.35 3.35" class="finger_motor"/>
+          <geom class="visual" material="shell" mesh="thumb_1"/>
+          <geom class="collision" mesh="thumb_1"/>
+          <body name="right_thumb_2" pos="0.013438 0.012862 -0.0076" quat="0.499998163 0.5 -0.500001837 -0.5">
+            <inertial pos="-0.0329899 0.0135009 0.00542279" mass="0.11057"
+              fullinertia="2.00605e-05 3.36932e-05 4.24625e-05 1.11948e-05 -3.96997e-06 1.21979e-06"/>
+            <joint name="right_thumb_joint2" axis="0.17365 0 -0.98481" range="0 0.62" actuatorfrcrange="-3 3" class="finger_motor"/>
+            <geom class="visual" material="body" mesh="thumb_2"/>
+            <geom class="visual" material="pad" mesh="thumb_force_sensor_1" pos="-0.023424 0.033251 0.007073" quat="0.639161708 -0.398927881 0.55127844 0.358358673"/>
+            <geom class="collision" mesh="thumb_2_col0"/>
+            <geom class="collision" mesh="thumb_2_col1"/>
+            <geom class="collision" mesh="thumb_2_col2"/>
+            <geom class="collision" mesh="thumb_2_col3"/>
+            <geom class="collision" mesh="thumb_2_col4"/>
+            <geom class="collision" mesh="thumb_2_col5"/>
+            <geom class="collision" mesh="thumb_2_col6"/>
+            <geom class="collision" mesh="thumb_2_col7"/>
+            <site name="thumb_force_sensor_1" class="pad" pos="-0.0234025 0.0328261 0.00664391" quat="0.639161708 -0.398927881 0.55127844 0.358358673" size="0.0068201 0.010132 0.004"/>
+            <body name="right_thumb_3" pos="-0.052954 0.032799 -0.0093372">
+              <inertial pos="-0.0110601 0.001645 0.0115172" mass="0.017909"
+                fullinertia="3.11939e-06 2.57911e-06 3.35378e-06 3.866e-07 1.36499e-08 -4.29005e-09"/>
+              <joint name="right_thumb_joint3" axis="0.17365 0 -0.98481" range="0 0.5203" class="finger_motor"/>
+              <geom class="visual" material="body" mesh="thumb_3"/>
+              <geom class="visual" material="pad" mesh="thumb_force_sensor_2" pos="-0.0080057 0.016443 0.0096921" quat="0.67351428 -0.372329926 0.560997419 0.305009569"/>
+              <geom class="collision" mesh="thumb_3_col0"/>
+              <geom class="collision" mesh="thumb_3_col1"/>
+              <geom class="collision" mesh="thumb_3_col2"/>
+              <geom class="collision" mesh="thumb_3_col3"/>
+              <geom class="collision" mesh="thumb_3_col4"/>
+              <geom class="collision" mesh="thumb_3_col5"/>
+              <site name="thumb_force_sensor_2" class="pad" pos="-0.00801724 0.0160006 0.00960373" quat="0.67351428 -0.372329926 0.560997419 0.305009569" size="0.0052144 0.005068 0.004"/>
+              <body name="right_thumb_4" pos="-0.01865 0.013373 -0.0022731">
+                <inertial pos="-0.0125438 0.00802982 0.0104557" mass="0.0078466"
+                  fullinertia="1.18752e-06 5.84068e-07 1.19803e-06 1.59615e-07 0 4.7667e-09"/>
+                <joint name="right_thumb_joint4" axis="0.17365 0 -0.98481" range="0 0.46359" class="finger_motor"/>
+                <geom class="visual" material="body" mesh="thumb_4"/>
+                <geom class="visual" material="pad" mesh="thumb_force_sensor_3" pos="-0.0076345 0.020486 0.0088067" quat="0.727040943 -0.241283101 0.610080927 0.2024727"/>
+                <geom class="visual" material="pad" mesh="thumb_force_sensor_4" pos="-0.01883 0.027914 0.0068326" quat="0.490906495 -0.588061895 0.411810283 0.493564901"/>
+                <geom class="collision" mesh="thumb_4"/>
+                <site name="thumb_force_sensor_3" class="pad" pos="-0.00731576 0.0196501 0.00886429" quat="0.727040943 -0.241283101 0.610080927 0.2024727" size="0.005545 0.0087971 0.004"/>
+                <site name="thumb_force_sensor_4" class="pad" pos="-0.0191461 0.0272375 0.00677822" quat="0.490906495 -0.588061895 0.411810283 0.493564901" size="0.0020002 0.0020072 0.004"/>
+              </body>
+            </body>
+          </body>
+        </body>
+        <body name="right_index_1" pos="0.00056467 -0.038679 -0.1564" quat="0.694659418 -0.719338789 0 0">
+          <inertial pos="0.00142891 0.0108751 0.00803498" mass="0.018893"
+            fullinertia="3.62091e-06 1.22918e-06 3.83667e-06 -4.33824e-07 1.18836e-09 1.85795e-09"/>
+          <joint name="right_index_joint" axis="0 0 -1" range="0 1.4381" actuatorfrcrange="-2.44 2.44" class="finger_motor"/>
+          <geom class="visual" material="body" mesh="index_1"/>
+          <geom class="visual" material="pad" mesh="index_force_sensor_1" pos="0.012046 0.019649 0.006651" quat="0.701686363 -0.062287287 0.704358119 0.0873852539"/>
+          <geom class="collision" mesh="proximal_col0"/>
+          <geom class="collision" mesh="proximal_col1"/>
+          <geom class="collision" mesh="proximal_col2"/>
+          <geom class="collision" mesh="proximal_col3"/>
+          <geom class="collision" mesh="proximal_col4"/>
+          <geom class="collision" mesh="proximal_col5"/>
+          <site name="index_force_sensor_1" class="pad" pos="0.0116528 0.0196359 0.00665084" quat="0.701686363 -0.062287287 0.704358119 0.0873852539" size="0.0056864 0.0073294 0.004"/>
+          <body name="right_index_2" pos="0.0034259 0.032596 0.00055">
+            <inertial pos="6.17961e-05 0.0183573 0.00794543" mass="0.011344"
+              fullinertia="2.50654e-06 4.36828e-07 2.6245e-06 -6.22287e-07 4.7634e-09 1.42248e-08"/>
+            <joint name="right_index_dip" axis="0 0 -1" range="0 1.5593" class="finger_motor"/>
+            <geom class="visual" material="body" mesh="index_2"/>
+            <geom class="visual" material="pad" mesh="index_force_sensor_2" pos="0.0081655 0.037446 0.0060795" quat="0.698536363 0.135589982 0.693985176 -0.109758285"/>
+            <geom class="visual" material="pad" mesh="index_force_sensor_3" pos="0.0086237 0.052572 0.0060954" quat="0.658742685 -0.226724563 0.669773138 0.257017492"/>
+            <geom class="collision" mesh="index_2"/>
+            <site name="index_force_sensor_2" class="pad" pos="0.00765901 0.0376791 0.00608543" quat="0.698536363 0.135589982 0.693985176 -0.109758285" size="0.0056062 0.0077877 0.004"/>
+            <site name="index_force_sensor_3" class="pad" pos="0.00793044 0.0516737 0.00610042" quat="0.658742685 -0.226724563 0.669773138 0.257017492" size="0.0030848 0.0020637 0.004"/>
+          </body>
+        </body>
+        <body name="right_middle_1" pos="0.00056467 -0.0171 -0.157" quat="0.707105483 -0.70710808 0 0">
+          <inertial pos="0.00147854 0.0111028 0.00804485" mass="0.018863"
+            fullinertia="3.6139e-06 1.22324e-06 3.82402e-06 -4.17399e-07 1.21453e-09 1.23065e-09"/>
+          <joint name="right_middle_joint" axis="0 0 -1" range="0 1.4381" actuatorfrcrange="-2.55 2.55" class="finger_motor"/>
+          <geom class="visual" material="body" mesh="middle_1"/>
+          <geom class="visual" material="pad" mesh="middle_force_sensor_1" pos="0.012046 0.019649 0.006651" quat="0.703133315 -0.0748445387 0.703135898 0.0748448137"/>
+          <geom class="collision" mesh="proximal_col0"/>
+          <geom class="collision" mesh="proximal_col1"/>
+          <geom class="collision" mesh="proximal_col2"/>
+          <geom class="collision" mesh="proximal_col3"/>
+          <geom class="collision" mesh="proximal_col4"/>
+          <geom class="collision" mesh="proximal_col5"/>
+          <site name="middle_force_sensor_1" class="pad" pos="0.0116528 0.0196359 0.00665085" quat="0.703133315 -0.0748445387 0.703135898 0.0748448137" size="0.005435 0.0071399 0.004"/>
+          <body name="right_middle_2" pos="0.0034259 0.032596 0.00055">
+            <inertial pos="0.00202163 0.0235218 0.00798491" mass="0.017999"
+              fullinertia="4.79646e-06 1.00109e-06 5.17402e-06 -1.39863e-06 7.04493e-09 2.44597e-08"/>
+            <joint name="right_middle_dip" axis="0 0 -1" range="0 1.5593" class="finger_motor"/>
+            <geom class="visual" material="body" mesh="middle_2"/>
+            <geom class="visual" material="pad" mesh="middle_force_sensor_2" pos="0.0090859 0.040963 0.0061003" quat="0.694853557 0.131059901 0.694856109 -0.131060383"/>
+            <geom class="visual" material="pad" mesh="middle_force_sensor_3" pos="0.0098294 0.056051 0.0061006" quat="0.667290497 -0.233926391 0.667292948 0.233927251"/>
+            <geom class="collision" mesh="middle_2"/>
+            <site name="middle_force_sensor_2" class="pad" pos="0.00857866 0.0412152 0.00610046" quat="0.694853557 0.131059901 0.694856109 -0.131060383" size="0.0053975 0.0076835 0.004"/>
+            <site name="middle_force_sensor_3" class="pad" pos="0.00917254 0.0551742 0.00610044" quat="0.667290497 -0.233926391 0.667292948 0.233927251" size="0.003 0.0019501 0.004"/>
+          </body>
+        </body>
+        <body name="right_ring_1" pos="0.00056467 0.0045302 -0.15683" quat="0.725386916 -0.688341356 0 0">
+          <inertial pos="0.0013003 0.0104596 0.00858897" mass="0.018893"
+            fullinertia="3.63281e-06 1.22713e-06 3.83138e-06 -4.05711e-07 -1.79107e-08 -1.32941e-07"/>
+          <joint name="right_ring_joint" axis="0 0 -1" range="0 1.4381" actuatorfrcrange="-2.44 2.44" class="finger_motor"/>
+          <geom class="visual" material="body" mesh="ring_1"/>
+          <geom class="visual" material="pad" mesh="ring_force_sensor_1" pos="0.012046 0.019649 0.006651" quat="0.704887257 -0.0936617759 0.700876287 0.0559808595"/>
+          <geom class="collision" mesh="proximal_col0"/>
+          <geom class="collision" mesh="proximal_col1"/>
+          <geom class="collision" mesh="proximal_col2"/>
+          <geom class="collision" mesh="proximal_col3"/>
+          <geom class="collision" mesh="proximal_col4"/>
+          <geom class="collision" mesh="proximal_col5"/>
+          <site name="ring_force_sensor_1" class="pad" pos="0.0116528 0.0196359 0.00665084" quat="0.704887257 -0.0936617759 0.700876287 0.0559808595" size="0.0058094 0.0074206 0.004"/>
+          <body name="right_ring_2" pos="0.0034259 0.032596 0.00055">
+            <inertial pos="-0.000336503 0.0179202 0.00882946" mass="0.011344"
+              fullinertia="2.53974e-06 4.2177e-07 2.62753e-06 -5.81735e-07 -1.97585e-08 -8.58543e-08"/>
+            <joint name="right_ring_dip" axis="0 0 -1" range="0 1.5593" class="finger_motor"/>
+            <geom class="visual" material="body" mesh="ring_2"/>
+            <geom class="visual" material="pad" mesh="ring_force_sensor_2" pos="0.0081655 0.037446 0.0060795" quat="0.692694078 0.103257265 0.699527011 -0.142038066"/>
+            <geom class="visual" material="pad" mesh="ring_force_sensor_3" pos="0.0086237 0.052572 0.0060954" quat="0.67229984 -0.264487394 0.655779341 0.219118232"/>
+            <geom class="collision" mesh="ring_2"/>
+            <site name="ring_force_sensor_2" class="pad" pos="0.00765901 0.0376791 0.00608542" quat="0.692694078 0.103257265 0.699527011 -0.142038066" size="0.0057425 0.0078799 0.004"/>
+            <site name="ring_force_sensor_3" class="pad" pos="0.00793046 0.0516737 0.00610042" quat="0.67229984 -0.264487394 0.655779341 0.219118232" size="0.0031247 0.0021294 0.004"/>
+          </body>
+        </body>
+        <body name="right_pinky_1" pos="0.00056467 0.025916 -0.15365" quat="0.743136987 -0.669139312 0 0">
+          <inertial pos="0.00092438 0.0100145 0.00911328" mass="0.018893"
+            fullinertia="3.66002e-06 1.22542e-06 3.81263e-06 -3.2249e-07 -2.80983e-08 -2.6883e-07"/>
+          <joint name="right_pinky_joint" axis="0 0 -1" range="0 1.4381" actuatorfrcrange="-2.17 2.17" class="finger_motor"/>
+          <geom class="visual" material="body" mesh="pinky_1"/>
+          <geom class="visual" material="pad" mesh="pinky_force_sensor_1" pos="0.012046 0.019649 0.006651" quat="0.706132317 -0.112374478 0.698120457 0.0371073371"/>
+          <geom class="collision" mesh="proximal_col0"/>
+          <geom class="collision" mesh="proximal_col1"/>
+          <geom class="collision" mesh="proximal_col2"/>
+          <geom class="collision" mesh="proximal_col3"/>
+          <geom class="collision" mesh="proximal_col4"/>
+          <geom class="collision" mesh="proximal_col5"/>
+          <site name="pinky_force_sensor_1" class="pad" pos="0.0116528 0.0196359 0.00665085" quat="0.706132317 -0.112374478 0.698120457 0.0371073371" size="0.0061671 0.00768 0.004"/>
+          <body name="right_pinky_2" pos="0.0034259 0.032596 0.00055">
+            <inertial pos="-0.00075094 0.0171062 0.00969512" mass="0.012001"
+              fullinertia="2.38226e-06 4.86081e-07 2.42423e-06 -5.12168e-07 -4.23401e-08 -1.81793e-07"/>
+            <joint name="right_pinky_dip" axis="0 0 -1" range="0 1.5593" class="finger_motor"/>
+            <geom class="visual" material="body" mesh="pinky_2"/>
+            <geom class="visual" material="pad" mesh="pinky_force_sensor_2" pos="0.0064512 0.027683 0.0061172" quat="0.689046258 0.081420444 0.702403669 -0.158792479"/>
+            <geom class="visual" material="pad" mesh="pinky_force_sensor_3" pos="0.0063972 0.042707 0.0061154" quat="0.678772284 -0.28913267 0.645292608 0.198161388"/>
+            <geom class="collision" mesh="pinky_2"/>
+            <site name="pinky_force_sensor_2" class="pad" pos="0.00588693 0.0279344 0.00611312" quat="0.689046258 0.081420444 0.702403669 -0.158792479" size="0.0062161 0.0082349 0.004"/>
+            <site name="pinky_force_sensor_3" class="pad" pos="0.00592275 0.0418775 0.00611315" quat="0.678772284 -0.28913267 0.645292608 0.198161388" size="0.0032366 0.0023286 0.004"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <!-- thumb_2 pivots inside a cradle moulded into the palm, so its collision
+       proxy and the palm's overlap at every thumb angle.  hand_base is
+       thumb_2's grandparent, so MuJoCo's parent/child filter misses it.
+       Palm contact still works through thumb_3 / thumb_4.
+
+       The finger roots are the palm's own children, so the parent filter
+       normally covers them, but it exempts bodies welded to the world,
+       which is what the palm becomes when this model is loaded on its own.
+       Listing them keeps the standalone model usable; in an arm they were
+       filtered anyway. -->
+  <contact>
+    <exclude body1="right_hand_base" body2="right_thumb_2"/>
+    <exclude body1="right_hand_base" body2="right_thumb_1"/>
+    <exclude body1="right_hand_base" body2="right_index_1"/>
+    <exclude body1="right_hand_base" body2="right_middle_1"/>
+    <exclude body1="right_hand_base" body2="right_ring_1"/>
+    <exclude body1="right_hand_base" body2="right_pinky_1"/>
+  </contact>
+
+  <!-- URDF <mimic>: the coupled joint is joint1 here, because MuJoCo solves
+       joint1 = polycoef(joint2).  Their ranges are the driving joint's range
+       times the ratio, not the URDF's own (slightly tighter) limits, so a
+       fully closed finger does not fight its own limit. -->
+  <equality>
+    <joint joint1="right_thumb_joint3" joint2="right_thumb_joint2" polycoef="0 0.8392 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint joint1="right_thumb_joint4" joint2="right_thumb_joint3" polycoef="0 0.891 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint joint1="right_index_dip" joint2="right_index_joint" polycoef="0 1.0843 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint joint1="right_middle_dip" joint2="right_middle_joint" polycoef="0 1.0843 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint joint1="right_ring_dip" joint2="right_ring_joint" polycoef="0 1.0843 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <joint joint1="right_pinky_dip" joint2="right_pinky_joint" polycoef="0 1.0843 0 0 0"
+      solref="0.02 1" solimp="0.9 0.95 0.001"/>
+  </equality>
+
+  <!-- Torque motors, gear 1, so ctrl is in Nm.  Limits are the datasheet
+       tip force times each drive's lever arm at full extension. -->
+  <actuator>
+    <motor name="thumb_rot"   joint="right_thumb_joint1"   ctrlrange="-3.35 3.35"/>
+    <motor name="thumb_flex"  joint="right_thumb_joint2"   ctrlrange="-3 3"/>
+    <motor name="index"       joint="right_index_joint"    ctrlrange="-2.44 2.44"/>
+    <motor name="middle"      joint="right_middle_joint"   ctrlrange="-2.55 2.55"/>
+    <motor name="ring"        joint="right_ring_joint"     ctrlrange="-2.44 2.44"/>
+    <motor name="pinky"       joint="right_pinky_joint"    ctrlrange="-2.17 2.17"/>
+  </actuator>
+
+  <sensor>
+    <jointpos name="thumb_rot_pos" joint="right_thumb_joint1"/>
+    <jointpos name="thumb_flex_pos" joint="right_thumb_joint2"/>
+    <jointpos name="index_pos" joint="right_index_joint"/>
+    <jointpos name="middle_pos" joint="right_middle_joint"/>
+    <jointpos name="ring_pos" joint="right_ring_joint"/>
+    <jointpos name="pinky_pos" joint="right_pinky_joint"/>
+
+    <jointvel name="thumb_rot_vel" joint="right_thumb_joint1"/>
+    <jointvel name="thumb_flex_vel" joint="right_thumb_joint2"/>
+    <jointvel name="index_vel" joint="right_index_joint"/>
+    <jointvel name="middle_vel" joint="right_middle_joint"/>
+    <jointvel name="ring_vel" joint="right_ring_joint"/>
+    <jointvel name="pinky_vel" joint="right_pinky_joint"/>
+
+    <jointactuatorfrc name="thumb_rot_torque" joint="right_thumb_joint1"/>
+    <jointactuatorfrc name="thumb_flex_torque" joint="right_thumb_joint2"/>
+    <jointactuatorfrc name="index_torque" joint="right_index_joint"/>
+    <jointactuatorfrc name="middle_torque" joint="right_middle_joint"/>
+    <jointactuatorfrc name="ring_torque" joint="right_ring_joint"/>
+    <jointactuatorfrc name="pinky_torque" joint="right_pinky_joint"/>
+
+    <!-- Tactile pads: 17 per hand, one <touch> scalar (sum of contact normal
+         force at the site, newtons) per real pad. 30 N full scale, accuracy
+         <=5% FS. Each site is the bounding box of that pad's mesh in the
+         URDF, grown to 8mm thick so a contact on the finger surface above
+         the pad falls inside it. noise is recorded for the user; the engine
+         does not inject it.
+
+         These are NOT what drives rt/inspire_hand/touch/{l,r} anymore --
+         hand_bridge.py computes real per-cell taxel grids itself by reading
+         mj_data.contact directly each publish and rasterizing each
+         contact's normal force onto nearby taxels in the corresponding
+         pad's local frame (Gaussian-kernel spread, not a rigid per-cell
+         collision geom), using these same site pos/quat as the pad frame
+         reference. Kept here as a coarse, independent cross-check value
+         (sum-of-rasterized-taxels should roughly track this) and because
+         collision geometry stays exactly what it always was -- no touch
+         model should ever perturb real contact dynamics.
+
+         Two things this replaced, and why: mujoco.sensor.touch_grid (a
+         plugin) needs ~20-25mm of clearance between its site and the
+         contact point before it reports anything nonzero (confirmed
+         empirically), and every pad here has under ~5.5mm of physical
+         clearance before hitting some other part of the hand -- see
+         https://github.com/google-deepmind/mujoco/discussions/2269 for the
+         same unresolved question from another user. A later attempt tiled
+         real tiny collision geoms per taxel (proven to give genuine spatial
+         resolution) but was abandoned in favor of the current
+         contact-rasterization approach: tiling collision geometry
+         double-counts force against these same coarse sensors' proxies and
+         adds real solve cost (measured ~31x -> ~3.3x realtime factor on the
+         full body), whereas rasterizing from unmodified contacts has
+         neither problem and gives a smoother, more sensor-realistic spread
+         besides.
+
+         Site-to-pad assignment is verified against both the RH56DFTP
+         manual's diagram and this asset's body nesting: base-to-tip is
+         pad -> nail -> tip. Thus force_sensor_1 on each plain finger's
+         proximal body maps to palm_touch (10x8), while force_sensor_2 and
+         _3 on its distal body map to top/nail_touch (12x8) and tip_touch
+         (3x3). The thumb follows the same base-to-tip convention with its
+         additional middle_touch pad between base and nail. -->
+    <touch name="fingerone_palm_touch" site="pinky_force_sensor_1" cutoff="30" noise="1.5"/>
+    <touch name="fingerone_top_touch" site="pinky_force_sensor_2" cutoff="30" noise="1.5"/>
+    <touch name="fingerone_tip_touch" site="pinky_force_sensor_3" cutoff="30" noise="1.5"/>
+
+    <touch name="fingertwo_palm_touch" site="ring_force_sensor_1" cutoff="30" noise="1.5"/>
+    <touch name="fingertwo_top_touch" site="ring_force_sensor_2" cutoff="30" noise="1.5"/>
+    <touch name="fingertwo_tip_touch" site="ring_force_sensor_3" cutoff="30" noise="1.5"/>
+
+    <touch name="fingerthree_palm_touch" site="middle_force_sensor_1" cutoff="30" noise="1.5"/>
+    <touch name="fingerthree_top_touch" site="middle_force_sensor_2" cutoff="30" noise="1.5"/>
+    <touch name="fingerthree_tip_touch" site="middle_force_sensor_3" cutoff="30" noise="1.5"/>
+
+    <touch name="fingerfour_palm_touch" site="index_force_sensor_1" cutoff="30" noise="1.5"/>
+    <touch name="fingerfour_top_touch" site="index_force_sensor_2" cutoff="30" noise="1.5"/>
+    <touch name="fingerfour_tip_touch" site="index_force_sensor_3" cutoff="30" noise="1.5"/>
+
+    <touch name="fingerfive_palm_touch" site="thumb_force_sensor_1" cutoff="30" noise="1.5"/>
+    <touch name="fingerfive_middle_touch" site="thumb_force_sensor_2" cutoff="30" noise="1.5"/>
+    <touch name="fingerfive_top_touch" site="thumb_force_sensor_3" cutoff="30" noise="1.5"/>
+    <touch name="fingerfive_tip_touch" site="thumb_force_sensor_4" cutoff="30" noise="1.5"/>
+
+    <touch name="palm_touch" site="palm_force_sensor" cutoff="30" noise="1.5"/>
+  </sensor>
+</mujoco>

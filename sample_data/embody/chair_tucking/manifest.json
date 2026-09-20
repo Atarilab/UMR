@@ -1,0 +1,67 @@
+{
+  "sequence_id": "chair_tucking",
+  "n_frames": 798,
+  "fps": 30.0,
+  "floor_z": -1.5012550354003906,
+  "held_body_ticks": 0,
+  "invalid_body_ticks": 0,
+  "shape_fit": {
+    "ridge": 0.1,
+    "betas_smplx": [
+      1.1584096568503799,
+      0.39226166849852423,
+      0.8215039059843702,
+      -0.17437709411159635,
+      -1.6286608050673914,
+      -2.565345836991902,
+      -0.16197806894477673,
+      0.4980331059461184,
+      -0.028765462668323222,
+      -0.21455750945615643
+    ],
+    "beta_abs_max": 2.565345836991902,
+    "joint_residual_mean_mm": 25.094424038165915,
+    "joint_residual_max_mm": 72.15812725397504,
+    "height_smplh_m": 1.8084054574516337,
+    "height_smplx_m": 1.8194548787310723,
+    "arm_span_smplh_m": 0.5384420197109571,
+    "arm_span_smplx_m": 0.5396617293439346,
+    "leg_length_smplh_m": 0.8112821570062869,
+    "leg_length_smplx_m": 0.8098355058814178
+  },
+  "conversion_gap": {
+    "joints_mean_mm": 29.193189763858612,
+    "joints_p90_mm": 50.275141945327206,
+    "wrists_mean_mm": 41.08902412296417,
+    "wrists_p90_mm": 47.40530810687936
+  },
+  "objects": [],
+  "object_selection": "all",
+  "object_size": "scaled",
+  "planned_scale": 1.0,
+  "robot_height_m": null,
+  "human_height_m": 1.8194548787310723,
+  "world_shift": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "world_anchor": {},
+  "rigid_objects": [
+    {
+      "stem": "office_chair_0",
+      "source": "s9 mesh on the s5 trajectory",
+      "motion": "moving",
+      "tracked_frames": 733,
+      "frames": 798
+    },
+    {
+      "stem": "table_2",
+      "source": "s9 mesh on the s5 trajectory",
+      "motion": "fixed",
+      "tracked_frames": 704,
+      "frames": 798
+    }
+  ],
+  "note": "ORIGINAL motion: floor at z = 0, no scale, no world shift. UMR applies its own smpl_scale and retarget_object_size when run."
+}

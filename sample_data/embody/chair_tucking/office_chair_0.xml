@@ -1,0 +1,15 @@
+<mujoco model="office_chair_0">
+ <compiler angle="radian" meshdir="meshes" />
+ <asset>
+  <mesh name="office_chair_0_visual" file="office_chair_0_visual.obj" />
+  <mesh name="office_chair_0_hull" file="office_chair_0_hull.obj" />
+ </asset>
+ <worldbody>
+  <body name="office_chair_0" pos="0 0 0">
+   <freejoint name="office_chair_0_freejoint" />
+   <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01" />
+   <geom name="office_chair_0_visual" type="mesh" mesh="office_chair_0_visual" group="2" contype="0" conaffinity="0" rgba="0.72 0.7 0.66 1" />
+   <geom name="office_chair_0_hull" type="mesh" mesh="office_chair_0_hull" group="3" contype="1" conaffinity="1" />
+  </body>
+ </worldbody>
+</mujoco>
