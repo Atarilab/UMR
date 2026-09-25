@@ -50,7 +50,11 @@ The recon pickle supplies `human_data` with SMPL-X `poses`, `trans`, `betas`,
 pipeline.
 
 The `object_mjcf/` directory contains the MuJoCo-ready visual mesh, convex
-collision pieces, and the object trajectory. It is reused when present. If it
+collision pieces, and the object trajectory. When the recon supplies
+`scene_data.table`, the static table box is also written as `grail_table.xml`
+with `prop_grail_table.csv`. Pickup-object USDs are already metric and their
+`obj_scale` equals their largest extent, so it is applied only when it differs
+from that extent, as for the scaled chairs in `sitting`. It is reused when present. If it
 is absent, `humanoid_retarget_defaults_hsi_hoi_grail.json` enables automatic
 USD export and CoACD convex decomposition. Textures are optional. For a
 concave object, retain the visual mesh and use the decomposed pieces as

@@ -28,7 +28,7 @@ def _load_obj_vertices(path: Path) -> np.ndarray:
     return np.asarray(vertices, dtype=np.float32)
 
 
-def build_smplx_model(model_dir: Path, gender: str, batch_size: int):
+def build_smplx_model(model_dir: Path, gender: str, batch_size: int, flat_hand_mean: bool = True):
     requested_dir = Path(model_dir).resolve()
     manifest_path = requested_dir / OVERLAY_MANIFEST
     manifest = None
@@ -76,7 +76,7 @@ def build_smplx_model(model_dir: Path, gender: str, batch_size: int):
         str(model_path),
         gender=str(gender).lower(),
         use_pca=False,
-        flat_hand_mean=True,
+        flat_hand_mean=bool(flat_hand_mean),
         num_betas=10,
         ext=model_ext,
         batch_size=int(batch_size),

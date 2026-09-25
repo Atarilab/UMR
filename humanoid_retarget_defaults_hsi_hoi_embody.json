@@ -1,0 +1,10 @@
+{
+  "extends": "humanoid_retarget_defaults_hsi_hoi_true_scale.json",
+  "motion": {
+    "data": "/home/ilyass/workspace/embody/sequences/bowl_in_microwave/s10_retarget/umr_io",
+    "seq_key": "bowl_in_microwave"
+  },
+  "retarget": {
+    "zero_source_finger_pose": false
+  }
+}

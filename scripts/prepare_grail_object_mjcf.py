@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import fcntl
-import hashlib
 import json
 import os
 import shutil
@@ -27,10 +26,23 @@ if str(SCRIPTS) not in sys.path:
 
 from humanoid_retarget_pipeline_hsi_hoi import (  # noqa: E402
     export_grail_usd_obj,
+    grail_asset_scale_current,
+    grail_table_box,
     load_grail_pickle,
+    resolve_grail_object_scale,
     safe_name,
+    write_grail_table_object,
 )
-from obj2mjcf.cli import CoacdArgs, decompose_convex  # noqa: E402
+from object_collision import (  # noqa: E402,F401  (re-exported for prepare_omomo_sequences.py)
+    CoacdArgs,
+    build_collision_cache,
+    collision_part_index,
+    exact_convex_components,
+    geometry_digest,
+    sanitize_collision_cache,
+    sorted_collision_parts,
+    valid_collision_part,
+)
 
 
 ASSET_VERSION = 3
@@ -70,105 +82,6 @@ def texture_for_sequence(data_root: Path, stem: str) -> Path | None:
         (path for path in sorted(texture_dir.glob("*")) if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}),
         None,
     )
-
-
-def geometry_digest(mesh: trimesh.Trimesh) -> str:
-    vertices = np.asarray(mesh.vertices, dtype=np.float64).round(8)
-    faces = np.asarray(mesh.faces, dtype=np.int64)
-    digest = hashlib.sha256()
-    digest.update(vertices.tobytes())
-    digest.update(faces.tobytes())
-    return digest.hexdigest()[:20]
-
-
-def exact_convex_components(mesh: trimesh.Trimesh) -> list[trimesh.Trimesh] | None:
-    processed = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=True)
-    components = list(processed.split(only_watertight=False))
-    if components and all(component.is_watertight and component.is_convex for component in components):
-        return components
-    return None
-
-
-def collision_part_index(path: Path) -> int:
-    tail = path.stem.rsplit("_", 1)[-1]
-    return int(tail) if tail.isdigit() else sys.maxsize
-
-
-def sorted_collision_parts(directory: Path) -> list[Path]:
-    return sorted(directory.glob("collision_*.obj"), key=collision_part_index)
-
-
-def valid_collision_part(path: Path) -> bool:
-    try:
-        mesh = trimesh.load(path, force="mesh", process=False)
-        vertices = np.asarray(mesh.vertices, dtype=np.float64).reshape(-1, 3)
-        unique = np.unique(vertices.round(10), axis=0)
-        return bool(len(unique) >= 4 and np.linalg.matrix_rank(unique - unique.mean(axis=0)) >= 3)
-    except Exception:
-        return False
-
-
-def sanitize_collision_cache(cache_dir: Path) -> list[Path]:
-    parts = sorted_collision_parts(cache_dir)
-    valid_parts = []
-    for part in parts:
-        if valid_collision_part(part):
-            valid_parts.append(part)
-        else:
-            print(f"[GRAILMJCF][WARN] dropping degenerate collision hull: {part}", flush=True)
-            part.unlink()
-    if not valid_parts:
-        return []
-    temporary = []
-    for index, part in enumerate(valid_parts):
-        target = cache_dir / f".collision_{index}.obj.tmp"
-        part.replace(target)
-        temporary.append(target)
-    outputs = []
-    for index, temporary_path in enumerate(temporary):
-        target = cache_dir / f"collision_{index}.obj"
-        temporary_path.replace(target)
-        outputs.append(target)
-    return outputs
-
-
-def build_collision_cache(visual_obj: Path, cache_dir: Path, coacd_args: CoacdArgs) -> tuple[list[Path], str]:
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = cache_dir.parent / f".{cache_dir.name}.lock"
-    with lock_path.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        cached_parts = sorted_collision_parts(cache_dir)
-        method_path = cache_dir / "method.txt"
-        if cached_parts and method_path.exists():
-            cached_parts = sanitize_collision_cache(cache_dir)
-            if cached_parts:
-                return cached_parts, method_path.read_text(encoding="utf-8").strip()
-
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        for partial in cache_dir.glob("*.obj"):
-            partial.unlink()
-        mesh = trimesh.load(visual_obj, force="mesh", process=True)
-        if not isinstance(mesh, trimesh.Trimesh):
-            raise TypeError(f"Expected one Trimesh from {visual_obj}, got {type(mesh)}")
-        components = exact_convex_components(mesh)
-        if components is not None:
-            method = "exact_convex_components"
-            for index, component in enumerate(components):
-                component.export(cache_dir / f"collision_{index}.obj")
-        else:
-            method = "obj2mjcf_coacd"
-            decompose_convex(visual_obj, cache_dir, coacd_args)
-            generated = sorted(
-                cache_dir.glob(f"{visual_obj.stem}_collision_*.obj"),
-                key=collision_part_index,
-            )
-            for index, path in enumerate(generated):
-                path.replace(cache_dir / f"collision_{index}.obj")
-        parts = sanitize_collision_cache(cache_dir)
-        if not parts:
-            raise RuntimeError(f"Convex decomposition produced no collision parts: {visual_obj}")
-        method_path.write_text(method + "\n", encoding="utf-8")
-        return parts, method
 
 
 def link_collision_parts(cached_parts: list[Path], sequence_dir: Path) -> list[Path]:
@@ -254,17 +167,21 @@ def _convert_sequence_unlocked(recon_path: Path, args, coacd_args: CoacdArgs) ->
             sequence_dir / "prop_grail_object.csv",
             *[sequence_dir / f"grail_object_collision_{index}.obj" for index in range(collision_count)],
         ]
-        if int(metadata.get("asset_version", 0)) == ASSET_VERSION and collision_count > 0 and all(path.exists() for path in required):
+        if (
+            int(metadata.get("asset_version", 0)) == ASSET_VERSION
+            and collision_count > 0
+            and all(path.exists() for path in required)
+            and grail_asset_scale_current(
+                recon_path, args.data_root / "object_usd" / f"{stem}.usd", metadata, sequence_dir
+            )
+        ):
             return {**metadata, "status": "reused"}
 
     sequence_dir.mkdir(parents=True, exist_ok=True)
     payload = load_grail_pickle(recon_path)
     obj_data = payload.get("obj_data", {})
-    object_scale = np.asarray(obj_data.get("obj_scale", np.ones(3)), dtype=np.float64).reshape(-1)
-    if object_scale.size == 1:
-        object_scale = np.repeat(object_scale, 3)
-    object_scale = object_scale[:3]
     usd_path = args.data_root / "object_usd" / f"{stem}.usd"
+    object_scale, object_scale_applied = resolve_grail_object_scale(usd_path, obj_data)
     visual_obj = sequence_dir / "grail_object.obj"
     texture_path = texture_for_sequence(args.data_root, stem)
     export_grail_usd_obj(usd_path, visual_obj, texture_path, object_scale)
@@ -278,6 +195,9 @@ def _convert_sequence_unlocked(recon_path: Path, args, coacd_args: CoacdArgs) ->
     xml_path = sequence_dir / "grail_object.xml"
     write_mjcf(xml_path, collision_parts)
     frame_count = write_motion(sequence_dir / "prop_grail_object.csv", obj_data)
+    table = grail_table_box(payload)
+    if table is not None:
+        write_grail_table_object(sequence_dir, table, frame_count)
     if args.validate:
         validate_mjcf(xml_path, len(collision_parts))
 
@@ -288,6 +208,8 @@ def _convert_sequence_unlocked(recon_path: Path, args, coacd_args: CoacdArgs) ->
         "geometry_digest": digest,
         "decomposition_method": method,
         "collision_parts": len(collision_parts),
+        "object_scale_applied": bool(object_scale_applied),
+        "scene_objects": ["grail_object"] + (["grail_table"] if table is not None else []),
         "frames": frame_count,
         "texture": texture_name,
         "coacd_args": asdict(coacd_args),

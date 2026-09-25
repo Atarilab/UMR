@@ -1,0 +1,14 @@
+{
+  "extends": "humanoid_retarget_defaults_hsi_hoi_standard.json",
+  "solver": {
+    "retarget_scene_mode": "true_scale",
+    "true_scale_anchor": "root_ground",
+    "true_scale_shift_smoothing": 0.25,
+    "true_scale_max_shift": 0.5,
+    "object_contact_map_cost": 50.0,
+    "interaction_mesh_cost": 200.0,
+    "interaction_mesh_radius": 0.3,
+    "interaction_mesh_max_object_points": 256,
+    "post_filter_refine_iters": 0
+  }
+}

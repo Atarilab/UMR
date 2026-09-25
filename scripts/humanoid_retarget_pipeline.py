@@ -39,19 +39,27 @@ RETARGET_VISUALIZATION_FIELDS = frozenset(
         "smpl_scale",
         "ground_z",
         "zero_source_finger_pose",
-        "retarget_object_size",
-        "object_mesh_scale",
-        "object_position_scale",
-        "object_position_offset",
-        "source_warp_offset",
-        "source_warp_anchor",
-        "object_names",
         "source_object_dir",
         "noitom_output_up",
         "noitom_convert_y_up",
         "noitom_ground_align",
         "noitom_floor_y",
         "noitom_ground_offset",
+        "retarget_scene_mode",
+        "object_names",
+        "object_source_paths",
+        "object_positions",
+        "object_quats_wxyz",
+        "object_contact_error",
+        "object_contact_count",
+        "robot_object_min_distance",
+        "scene_body_shift",
+        "joint_coupling_names",
+        "joint_coupling_residual",
+        "hand_fingertip_names",
+        "hand_fingertip_targets",
+        "hand_fingertip_error_world",
+        "hand_fingertip_error_local",
     }
 )
 REQUIRED_RETARGET_OUTPUT_FIELDS = frozenset(
@@ -98,26 +106,12 @@ RETARGET_SOLVER_ARGS = (
     "object_contact_map_max_points",
     "object_contact_map_samples",
     "retarget_object_size",
-    "scene_scale_anchor",
-    "contact_anchor_threshold",
-    "contact_anchor_min_pairs",
-    "contact_anchor_smooth_acceleration_cost",
-    "contact_anchor_smooth_jerk_cost",
-    "contact_anchor_max_speed",
-    "object_contact_pair_latch",
-    "object_contact_release_threshold_scale",
-    "object_contact_fade_frames",
-    "object_contact_surface_relax",
-    "object_contact_surface_relax_scope",
-    "root_smooth_cost",
-    "root_temporal_smooth_cost",
-    "ground_contact_anchor_release_threshold",
-    "trajectory_filter_root_rotation",
-    "trajectory_filter_reproject",
-    "trajectory_filter_reproject_iters",
-    "trajectory_filter_reproject_tolerance",
-    "trajectory_filter_reproject_root_weight",
-    "trajectory_filter_reproject_smooth_cost",
+    "retarget_scene_mode",
+    "true_scale_anchor",
+    "interaction_mesh_cost",
+    "interaction_mesh_radius",
+    "interaction_mesh_max_object_points",
+    "post_filter_refine_iters",
     "robot_object_penetration_soft_cost",
     "robot_object_hard_constraint",
     "robot_object_margin",
@@ -969,6 +963,215 @@ def train_correspondence(config: dict[str, Any], dataset_path: Path, force=False
     return final_slots
 
 
+HAND_TRAIN_DEFAULTS = {
+    "epochs": 3000,
+    "batch_size": 1,
+    "fixed_template": True,
+    "normalize": "none",
+    "template_sort": "x_y_z",
+    "repulsion_weight": 0.002,
+    "repulsion_radius": 0.05,
+    "residual_weight": 0.0,
+    "edge_weight": 0.4,
+    "edge_graph": "geodesic",
+    "edge_k": 16,
+    "noise_std": 0.002,
+}
+
+
+def hands_config(config: dict[str, Any]) -> dict[str, Any] | None:
+    """robot.hands when dedicated hand correspondences are enabled, else None."""
+    hands = robot_config(config).get("hands") or {}
+    return hands if bool_value(hands.get("enabled"), False) else None
+
+
+def hand_dataset_out(config: dict[str, Any], side: str) -> Path:
+    body = dataset_out(config)
+    return body.with_name(f"{body.stem}_hand_{side}.npz")
+
+
+def hand_train_out_dir(config: dict[str, Any], side: str) -> Path:
+    body = train_out_dir(config)
+    return body.with_name(f"{body.name}_hand_{side}")
+
+
+def merged_slots_out(config: dict[str, Any]) -> Path:
+    return train_out_dir(config) / "correspondence_slots_final_hands.npz"
+
+
+def hand_config_hash_for(config: dict[str, Any], side: str | None = None) -> str:
+    import hand_correspondence as hc
+
+    robot = robot_config(config)
+    template_cfg = smpl_template_config(config)
+    pose = effective_robot_sample_pose(config, template_cfg)
+    payload = {
+        "version": 1,
+        "hands": robot.get("hands"),
+        "xml": str(resolve_path(robot.get("xml"), config)),
+        "sample_pose": pose,
+        "sample_qpos": effective_robot_sample_qpos(config, pose),
+        "joint_couplings": robot.get("joint_couplings", "off"),
+        "center": str(robot.get("sample_point_cloud_center", robot["point_cloud_center"])),
+        "template": expected_smpl_slot_name(config),
+        "side": side,
+    }
+    return hc.hand_config_hash(payload)
+
+
+def _saved_hash(path: Path) -> str | None:
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            return str(np.asarray(data["meta_hand_config_hash"]).item()) if "meta_hand_config_hash" in data else None
+    except Exception:
+        return None
+
+
+def build_hand_correspondence_dataset(config, side, body_dataset_path, force=False, dry_run=False) -> Path:
+    import build_correspondence_ae_dataset as build
+    import hand_correspondence as hc
+    from joint_couplings import JointCouplings
+
+    out = hand_dataset_out(config, side)
+    config_hash = hand_config_hash_for(config, side)
+    if out.exists() and not force and _saved_hash(out) == config_hash:
+        print(f"[HumanoidPipeline] reuse hand correspondence dataset: {out}")
+        return out
+    if dry_run:
+        print(f"[HumanoidPipeline] would build hand correspondence dataset: {out}")
+        return out
+    hands = hands_config(config)
+    robot = robot_config(config)
+    dataset_cfg = section(section(config, "correspondence"), "dataset")
+    hand_ds = hands.get("dataset", {})
+    num_points = int(hands.get("num_points", 512))
+    seed = int(hand_ds.get("seed", 0))
+    oversample = int(hand_ds.get("surface_oversample_ratio", 8))
+    part_offset = float(hands.get("part_offset", 4.0))
+    human_name = expected_smpl_slot_name(config)
+    template_cfg = smpl_template_config(config)
+    if template_cfg["type"] != "smplx":
+        raise ValueError("Dedicated hand correspondences require an SMPL-X human template")
+
+    with np.load(body_dataset_path, allow_pickle=True) as body:
+        names = [str(n) for n in body["names"]]
+        idx = names.index(human_name)
+        body_vertices = np.asarray(body[f"mesh_vertices_{idx}"], dtype=np.float32)
+        betas = np.asarray(body[f"betas_{idx}"], dtype=np.float32) if f"betas_{idx}" in body else np.zeros(0)
+    model_dir = resolve_path(config.get("smplx_model_dir"), config, "smpl")
+    vertices, joints, faces = build.load_smpl_template(model_dir, "smplx", template_cfg["gender"], betas=betas if betas.size else None)
+    center, _joint_id, _mode = build.smpl_center_offset(
+        vertices, joints, str(dataset_cfg.get("smpl_center", "spine1")), float(dataset_cfg.get("bbox_center_ratio", 0.45))
+    )
+    vertices, joints = vertices - center[None], joints - center[None]
+    if vertices.shape != body_vertices.shape or float(np.abs(vertices - body_vertices).max()) > 1e-4:
+        raise ValueError("Rebuilt SMPL-X template does not match the body correspondence dataset mesh")
+    human = hc.build_human_hand_sample(vertices, faces, joints, side, num_points, seed, oversample, part_offset)
+
+    model = build.load_mujoco_model(resolve_path(robot.get("xml"), config))
+    couplings = JointCouplings.from_model(model, robot.get("joint_couplings", "off"))
+    pose = effective_robot_sample_pose(config, template_cfg)
+    data = hc.robot_hand_pose(model, robot, effective_robot_sample_qpos(config, pose), couplings)
+    robot_sample = hc.build_robot_hand_sample(
+        model, data, hands["sides"][side], side,
+        str(robot.get("sample_point_cloud_center", robot["point_cloud_center"])),
+        num_points, seed + 9000, oversample, part_offset,
+        to_smpl_frame=bool_value(robot.get("to_smpl_frame"), True),
+    )
+    robot_name = str(robot.get("slot_name", robot["name"]))
+    hc.write_hand_dataset(out, side, human, robot_sample, human_name, robot_name, num_points, seed, oversample, part_offset, config_hash)
+    ratio = robot_sample["part_scale"] / human["part_scale"]
+    print(
+        f"[HumanoidPipeline] saved hand correspondence dataset: {out} side={side} points={num_points} "
+        "robot/human part scale "
+        + ", ".join(f"{part}={float(np.mean(r)):.2f}" for part, r in zip(hc.HAND_PARTS, ratio))
+    )
+    return out
+
+
+def train_hand_correspondence(config, side, dataset_path, force=False, dry_run=False) -> Path:
+    out_dir = hand_train_out_dir(config, side)
+    final = out_dir / "correspondence_slots_final.npz"
+    stamp = out_dir / "hand_config_hash.txt"
+    config_hash = hand_config_hash_for(config, side)
+    if final.exists() and not force and stamp.exists() and stamp.read_text().strip() == config_hash:
+        print(f"[HumanoidPipeline] reuse hand correspondence slots: {final}")
+        return final
+    hands = hands_config(config)
+    train = {**HAND_TRAIN_DEFAULTS, **(hands.get("train") or {})}
+    base_train = section(section(config, "correspondence"), "train")
+    train_args = {
+        "data": dataset_path,
+        "out_dir": out_dir,
+        "template_name": expected_smpl_slot_name(config),
+        "num_points": int(hands.get("num_points", 512)),
+        "lr": train.get("lr", 1e-3),
+        "lr_scheduler": train.get("lr_scheduler", "cosine"),
+        "min_lr": train.get("min_lr", 1e-5),
+        "chamfer_weight": train.get("chamfer_weight", 1.0),
+        "repulsion_k": train.get("repulsion_k", 8),
+        "dropout_ratio": train.get("dropout_ratio", 0.0),
+        "log_every": train.get("log_every", 500),
+        "save_every": train.get("save_every", 100000),
+        "seed": train.get("seed", 0),
+        "device": train.get("device", base_train.get("device", "auto")),
+        **{key: train[key] for key in HAND_TRAIN_DEFAULTS},
+    }
+    cmd = [PYTHON, str(SCRIPTS / "train_correspondence_template_residual_ae.py"), *list_of_args(train_args)]
+    run_command(cmd, dry_run=dry_run)
+    if not dry_run:
+        stamp.write_text(config_hash + "\n")
+    return final
+
+
+def merge_hand_correspondence(config, body_slots_path, body_dataset_path, hand_slots, hand_datasets, force=False, dry_run=False) -> Path:
+    import build_correspondence_ae_dataset as build
+    import hand_correspondence as hc
+
+    out = merged_slots_out(config)
+    config_hash = hand_config_hash_for(config)
+    sources = [Path(body_slots_path), *map(Path, hand_slots.values())]
+    if (
+        out.exists()
+        and not force
+        and _saved_hash(out) == config_hash
+        and all(src.stat().st_mtime_ns <= out.stat().st_mtime_ns for src in sources)
+    ):
+        print(f"[HumanoidPipeline] reuse merged hand correspondence slots: {out}")
+        return out
+    if dry_run:
+        print(f"[HumanoidPipeline] would merge hand correspondence slots: {out}")
+        return out
+    robot = robot_config(config)
+    model = build.load_mujoco_model(resolve_path(robot.get("xml"), config))
+    hc.merge_hand_slots(
+        body_slots_path, body_dataset_path, hand_slots, hand_datasets, out, model, robot,
+        expected_smpl_slot_name(config), str(robot.get("slot_name", robot["name"])), config_hash,
+    )
+    try:
+        from export_hand_correspondence_viewer import export_hand_correspondence_viewer
+
+        export_hand_correspondence_viewer(config, merged_slots=out)
+    except ImportError:
+        pass
+    return out
+
+
+def ensure_retarget_slots(config, body_slots_path, force_build=False, force_train=False, dry_run=False) -> Path:
+    """Slots the retargeter uses: body slots, or body + dedicated hand slots when robot.hands is enabled."""
+    if hands_config(config) is None:
+        return body_slots_path
+    body_dataset_path = dataset_out(config)
+    hand_datasets, hand_slots = {}, {}
+    for side in ("left", "right"):
+        hand_datasets[side] = build_hand_correspondence_dataset(config, side, body_dataset_path, force=force_build, dry_run=dry_run)
+        hand_slots[side] = train_hand_correspondence(config, side, hand_datasets[side], force=force_train, dry_run=dry_run)
+    return merge_hand_correspondence(
+        config, body_slots_path, body_dataset_path, hand_slots, hand_datasets,
+        force=force_build or force_train, dry_run=dry_run,
+    )
+
+
 def retarget_motion(config: dict[str, Any], slots_path: Path, force=False, dry_run=False) -> Path:
     out = retarget_out(config)
     if out.exists() and not force:
@@ -1067,6 +1270,9 @@ def run_pipeline(config: dict[str, Any], args: argparse.Namespace) -> None:
         if (not slots_path.exists() or not correspondence_slots_compatible(slots_path, config)) and not args.dry_run:
             dataset_path = build_correspondence_dataset(config, force=args.force_build, dry_run=args.dry_run)
             slots_path = train_correspondence(config, dataset_path, force=args.force_train, dry_run=args.dry_run)
+        slots_path = ensure_retarget_slots(
+            config, slots_path, force_build=args.force_build, force_train=args.force_train, dry_run=args.dry_run
+        )
         result_path = retarget_motion(config, slots_path, force=args.force_retarget, dry_run=args.dry_run)
     if args.stage == "view":
         visualize_result(config, result_path, dry_run=args.dry_run)

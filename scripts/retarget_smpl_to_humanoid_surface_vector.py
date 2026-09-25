@@ -34,6 +34,10 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import hoi_scene  # noqa: E402
+import hand_body_segments  # noqa: E402
+import hand_correspondence  # noqa: E402
+from joint_couplings import JointCouplings  # noqa: E402
 import smpl_surface_retarget_common as common  # noqa: E402
 from humanoid_retarget_config import load_config, resolve_path, robot_config, section  # noqa: E402
 from mujoco_geom_surface import geom_local_mesh, surface_geom_ids  # noqa: E402
@@ -185,31 +189,13 @@ def parse_args():
     parser.add_argument("--object-contact-map-snap-threshold", type=float, default=None)
     parser.add_argument("--object-contact-map-max-points", type=int, default=None)
     parser.add_argument("--object-contact-map-samples", type=int, default=None)
-    parser.add_argument("--retarget-object-size", choices=("scaled", "original", "real", "real_xy"), default=None)
-    parser.add_argument("--scene-scale-anchor", choices=("origin", "scene_centroid"), default=None)
-
-    parser.add_argument("--contact-anchor-threshold", type=float, default=None)
-    parser.add_argument("--contact-anchor-min-pairs", type=int, default=None)
-    parser.add_argument("--contact-anchor-smooth-acceleration-cost", type=float, default=None)
-    parser.add_argument("--contact-anchor-smooth-jerk-cost", type=float, default=None)
-    parser.add_argument("--contact-anchor-max-speed", type=float, default=None)
-    parser.add_argument("--object-contact-pair-latch", dest="object_contact_pair_latch", action="store_true", default=None)
-    parser.add_argument("--no-object-contact-pair-latch", dest="object_contact_pair_latch", action="store_false")
-    parser.add_argument("--object-contact-release-threshold-scale", type=float, default=None)
-    parser.add_argument("--object-contact-fade-frames", type=int, default=None)
-    parser.add_argument("--object-contact-surface-relax", type=float, default=None)
-    parser.add_argument("--object-contact-surface-relax-scope", choices=("slot", "segment"), default=None)
-    parser.add_argument("--root-smooth-cost", type=float, default=None)
-    parser.add_argument("--root-temporal-smooth-cost", type=float, default=None)
-    parser.add_argument("--ground-contact-anchor-release-threshold", type=float, default=None)
-    parser.add_argument("--trajectory-filter-root-rotation", dest="trajectory_filter_root_rotation", action="store_true", default=None)
-    parser.add_argument("--no-trajectory-filter-root-rotation", dest="trajectory_filter_root_rotation", action="store_false")
-    parser.add_argument("--trajectory-filter-reproject", dest="trajectory_filter_reproject", action="store_true", default=None)
-    parser.add_argument("--no-trajectory-filter-reproject", dest="trajectory_filter_reproject", action="store_false")
-    parser.add_argument("--trajectory-filter-reproject-iters", type=int, default=None)
-    parser.add_argument("--trajectory-filter-reproject-tolerance", type=float, default=None)
-    parser.add_argument("--trajectory-filter-reproject-root-weight", type=float, default=None)
-    parser.add_argument("--trajectory-filter-reproject-smooth-cost", type=float, default=None)
+    parser.add_argument("--retarget-object-size", choices=("scaled", "original"), default=None)
+    parser.add_argument("--retarget-scene-mode", choices=hoi_scene.RETARGET_SCENE_MODES, default=None)
+    parser.add_argument("--true-scale-anchor", choices=hoi_scene.TRUE_SCALE_ANCHOR_MODES, default=None)
+    parser.add_argument("--interaction-mesh-cost", type=float, default=None)
+    parser.add_argument("--interaction-mesh-radius", type=float, default=None)
+    parser.add_argument("--interaction-mesh-max-object-points", type=int, default=None)
+    parser.add_argument("--post-filter-refine-iters", type=int, default=None)
     parser.add_argument("--robot-object-penetration-soft-cost", type=float, default=None)
     parser.add_argument(
         "--robot-object-hard-constraint",
@@ -384,6 +370,17 @@ def fill_args_from_config(args):
     set_default(args, "smplx_batch_size_safety_factor", retarget.get("smplx_batch_size_safety_factor", 0.8))
     set_default(args, "robot_xml", resolve_path(robot.get("xml"), config))
     set_default(args, "slots", resolve_path(corr.get("slots"), config, DEFAULT_SLOTS))
+    args.hand_info = None
+    hands_cfg = robot.get("hands") or {}
+    if bool(hands_cfg.get("enabled", False)) and Path(args.slots).exists():
+        args.hand_info = hand_correspondence.load_hand_slot_info(args.slots)
+        if args.hand_info is not None:
+            args.hand_part_ids = hand_body_segments.install(importlib.import_module(args.body_segment_module), hands_cfg)
+            args.hand_retarget_cfg = dict(hands_cfg.get("retarget") or {})
+            print(
+                f"[HumanoidRetarget][Hands] dedicated hand slots={int((args.hand_info['side'] >= 0).sum())} "
+                f"finger segments installed; target_mode={args.hand_retarget_cfg.get('target_mode', 'part_proportional')}"
+            )
     set_default(args, "slots_field", corr.get("slots_field", "reconstructed_slots"))
     set_default(args, "smpl_name", corr.get("smpl_name", "auto"))
     set_default(args, "robot_name", robot.get("slot_name", robot.get("name")))
@@ -397,6 +394,7 @@ def fill_args_from_config(args):
     set_default(args, "mat_height", retarget.get("mat_height", 0.0))
     set_default(args, "source_ground_align", retarget.get("source_ground_align", "global_foot_joint"))
     set_default(args, "zero_source_finger_pose", retarget.get("zero_source_finger_pose", True))
+    args.source_hand_pose_convention = str(retarget.get("source_hand_pose_convention", "flat"))
     set_default(args, "surface_normal_cost_mode", solver.get("surface_normal_cost_mode", "tpose_offset"))
     set_default(args, "ground_contact_map_cost", solver.get("ground_contact_map_cost", 0.0))
     set_default(args, "ground_contact_anchor_cost", solver.get("ground_contact_anchor_cost", 0.0))
@@ -425,51 +423,12 @@ def fill_args_from_config(args):
     set_default(args, "object_contact_map_max_points", solver.get("object_contact_map_max_points", 128))
     set_default(args, "object_contact_map_samples", solver.get("object_contact_map_samples", 1024))
     set_default(args, "retarget_object_size", solver.get("retarget_object_size", "scaled"))
-    set_default(args, "scene_scale_anchor", solver.get("scene_scale_anchor", "origin"))
-
-    set_default(args, "contact_anchor_threshold", solver.get("contact_anchor_threshold", 0.03))
-    set_default(args, "contact_anchor_min_pairs", solver.get("contact_anchor_min_pairs", 4))
-    set_default(
-        args,
-        "contact_anchor_smooth_acceleration_cost",
-        solver.get("contact_anchor_smooth_acceleration_cost", 1000.0),
-    )
-    set_default(args, "contact_anchor_smooth_jerk_cost", solver.get("contact_anchor_smooth_jerk_cost", 100.0))
-    set_default(args, "contact_anchor_max_speed", solver.get("contact_anchor_max_speed", 0.5))
-    set_default(args, "object_contact_pair_latch", solver.get("object_contact_pair_latch", False))
-    set_default(
-        args,
-        "object_contact_release_threshold_scale",
-        solver.get("object_contact_release_threshold_scale", 1.0),
-    )
-    set_default(args, "object_contact_fade_frames", solver.get("object_contact_fade_frames", 0))
-    set_default(args, "object_contact_surface_relax", solver.get("object_contact_surface_relax", 1.0))
-    set_default(args, "object_contact_surface_relax_scope", solver.get("object_contact_surface_relax_scope", "slot"))
-    set_default(args, "root_smooth_cost", solver.get("root_smooth_cost", 0.0))
-    set_default(args, "root_temporal_smooth_cost", solver.get("root_temporal_smooth_cost", 0.0))
-    set_default(
-        args,
-        "ground_contact_anchor_release_threshold",
-        solver.get("ground_contact_anchor_release_threshold", 0.0),
-    )
-    set_default(args, "trajectory_filter_root_rotation", solver.get("trajectory_filter_root_rotation", False))
-    set_default(args, "trajectory_filter_reproject", solver.get("trajectory_filter_reproject", False))
-    set_default(args, "trajectory_filter_reproject_iters", solver.get("trajectory_filter_reproject_iters", 3))
-    set_default(
-        args,
-        "trajectory_filter_reproject_tolerance",
-        solver.get("trajectory_filter_reproject_tolerance", 1e-4),
-    )
-    set_default(
-        args,
-        "trajectory_filter_reproject_root_weight",
-        solver.get("trajectory_filter_reproject_root_weight", 10.0),
-    )
-    set_default(
-        args,
-        "trajectory_filter_reproject_smooth_cost",
-        solver.get("trajectory_filter_reproject_smooth_cost", 0.0),
-    )
+    set_default(args, "retarget_scene_mode", solver.get("retarget_scene_mode", "scaled"))
+    set_default(args, "true_scale_anchor", solver.get("true_scale_anchor", "root_ground"))
+    set_default(args, "interaction_mesh_cost", solver.get("interaction_mesh_cost", 0.0))
+    set_default(args, "interaction_mesh_radius", solver.get("interaction_mesh_radius", 0.3))
+    set_default(args, "interaction_mesh_max_object_points", solver.get("interaction_mesh_max_object_points", 256))
+    set_default(args, "post_filter_refine_iters", solver.get("post_filter_refine_iters", 0))
     set_default(args, "robot_object_penetration_soft_cost", solver.get("robot_object_penetration_soft_cost", 0.0))
     set_default(args, "robot_object_hard_constraint", solver.get("robot_object_hard_constraint", False))
     set_default(args, "robot_object_margin", solver.get("robot_object_margin", 0.0))
@@ -722,6 +681,23 @@ def collect_root_mesh(model, data, geom_ids, point_cloud_center_name):
     )
 
 
+def hand_slot_bind_groups(model, args):
+    """(slot ids, visual geom ids) per hand part: fingers 1-2 cm apart must bind to their own link."""
+    visual = visual_geom_ids(model, robot_config(args.config_data).get("visual_geom_policy", "auto"))
+    groups = []
+    for side in hand_correspondence.SIDES:
+        side_cfg = args.hand_info["robot"][side]
+        for k, part in enumerate(hand_correspondence.HAND_PARTS):
+            slots = np.flatnonzero(
+                (args.hand_info["side"] == hand_correspondence.SIDE_INDEX[side]) & (args.hand_info["part"] == k)
+            )
+            bodies = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in side_cfg["parts"][part]["bodies"]}
+            geoms = np.asarray([g for g in visual if int(model.geom_bodyid[int(g)]) in bodies], dtype=np.int32)
+            if slots.size and geoms.size:
+                groups.append((slots.astype(np.int32), geoms))
+    return groups
+
+
 def bind_robot_slots(
     model,
     args,
@@ -730,6 +706,7 @@ def bind_robot_slots(
     project_to_surface=True,
     source_model_type=None,
     template_cfg=None,
+    slot_groups=None,
 ):
     config = args.config_data
     robot = robot_config(config)
@@ -757,8 +734,16 @@ def bind_robot_slots(
     points_root = smpl_frame_to_robot_root(robot_slot_points_smpl, matrix)
     binding = common.bind_points_to_mesh(points_root, vertices, faces, nearest_vertex_k=nearest_vertex_k)
     bound_geom_ids = face_geom_ids[binding["face_ids"]]
-    points_root_bound = binding["closest_points"] if project_to_surface else points_root
-    normals_world = binding["closest_normals"] @ center_rot.T
+    closest_points = np.asarray(binding["closest_points"]).copy()
+    closest_normals = np.asarray(binding["closest_normals"]).copy()
+    for group_slots, group_geoms in slot_groups or []:
+        g_vertices, g_faces, g_face_geoms, _pos, _rot, _label = collect_root_mesh(model, ref_data, group_geoms, point_cloud_center)
+        g_binding = common.bind_points_to_mesh(points_root[group_slots], g_vertices, g_faces, nearest_vertex_k=nearest_vertex_k)
+        bound_geom_ids[group_slots] = g_face_geoms[g_binding["face_ids"]]
+        closest_points[group_slots] = g_binding["closest_points"]
+        closest_normals[group_slots] = g_binding["closest_normals"]
+    points_root_bound = closest_points if project_to_surface else points_root
+    normals_world = closest_normals @ center_rot.T
     points_world = points_root_bound @ center_rot.T + center_pos
     local_pos = np.empty_like(points_root_bound, dtype=np.float32)
     local_normals = np.empty_like(points_root_bound, dtype=np.float32)
@@ -1208,17 +1193,7 @@ def read_prop_motion(
     floor_y: float,
     ground_offset: float,
     smpl_scale: float,
-    position_scale=None,
-    z_offset: float = 0.0,
 ):
-    """Object poses per frame.
-
-    ``position_scale`` is a scalar or a per-axis 3-vector and defaults to ``smpl_scale``, the
-    world-shrink convention the ``scaled`` and ``original`` modes use. ``real`` passes 1.0 so the
-    object keeps the trajectory it was recorded with; ``real_xy`` passes ``(s, s, 1)`` so the floor
-    plan shrinks with the human while heights stay exactly as recorded. ``z_offset`` carries the
-    human's ground shift so both sides of the scene sit on the same floor.
-    """
     with Path(prop_csv).open("r", newline="", errors="replace") as f:
         rows = list(csv.DictReader(f))
     required = {"px", "py", "pz", "qx", "qy", "qz", "qw"}
@@ -1239,17 +1214,7 @@ def read_prop_motion(
         floor_y,
         ground_offset,
     )
-    if float(z_offset) != 0.0:
-        positions = positions.copy()
-        positions[:, 2] -= float(z_offset)
-    scale_vector = np.asarray(
-        smpl_scale if position_scale is None else position_scale, dtype=np.float64
-    ).reshape(-1)
-    if scale_vector.size == 1:
-        scale_vector = np.repeat(scale_vector, 3)
-    if scale_vector.size != 3:
-        raise ValueError(f"position_scale must be a scalar or a 3-vector, got {position_scale!r}")
-    positions = positions * scale_vector[None, :].astype(np.float32)
+    positions = positions * float(smpl_scale)
     basis = y_up_to_z_up_matrix(output_up, convert_y_up)
     rot_mats = R.from_quat(quats_xyzw[clipped]).as_matrix()
     rot_mats = basis[None, :, :] @ rot_mats @ basis.T[None, :, :]
@@ -1265,421 +1230,142 @@ def read_prop_motion(
     }
 
 
-def object_transform_config(args) -> dict:
-    """The sequence's object frame conventions, shared by every object in the scene."""
-    hsi = section(args.config_data, "hsi_hoi")
-    object_cfg = section(hsi, "object")
-    return {
-        "output_up": str(object_cfg.get("output_up", hsi.get("output_up", "z"))),
-        "convert_y_up": bool_config(object_cfg.get("convert_y_up"), True),
-        "ground_align": bool_config(object_cfg.get("ground_align"), False),
-        "floor_y": float(object_cfg.get("floor_y", 0.0)),
-        "ground_offset": float(object_cfg.get("ground_offset", 0.0)),
-        "object_scale": float(object_cfg.get("object_scale", 0.01)),
-    }
-
-
-def discover_scene_objects(source_dir: Path, require_exact_prop: bool = False):
-    """Every ``<stem>.xml``/``<stem>.obj`` in the directory that has a ``prop_<stem>.csv``.
-
-    ``resolve_prop_trajectory`` falls back to the only ``prop_*.csv`` in the directory when the
-    exactly-named one is missing, which is right for a single-object sequence and wrong as soon as
-    several objects share a directory: every object without its own trajectory would silently
-    adopt another object's. ``require_exact_prop`` turns that fallback off, and the multi-object
-    loader uses it; the single-object modes keep the original behaviour.
-    """
+def discover_scene_objects(source_dir: Path):
+    """Every object with its own ``prop_<stem>.csv``; mesh pieces without one are not objects."""
     stems = sorted({path.stem for path in source_dir.glob("*.xml")} | {path.stem for path in source_dir.glob("*.obj")})
     candidates = []
     for stem in stems:
         source = source_dir / f"{stem}.xml" if (source_dir / f"{stem}.xml").exists() else source_dir / f"{stem}.obj"
-        if require_exact_prop:
-            prop = source_dir / f"prop_{stem}.csv"
-            if not prop.exists():
-                print(
-                    f"[HumanoidRetarget][ObjectSource][WARN] {source.name} has no prop_{stem}.csv; "
-                    "skipping it rather than borrowing another object's trajectory."
-                )
-                continue
-        else:
-            try:
-                prop = resolve_prop_trajectory(source)
-            except FileNotFoundError:
-                continue
-        candidates.append((stem, source, prop))
+        prop = source_dir / f"prop_{stem}.csv"
+        if prop.exists():
+            candidates.append((stem, source, prop))
+    if not candidates:
+        # Legacy layout: one object description next to a single prop CSV.
+        props = sorted(source_dir.glob("prop_*.csv"))
+        sources = sorted(source_dir.glob("*.xml")) or sorted(source_dir.glob("*.obj"))
+        if len(props) == 1 and sources:
+            candidates.append((sources[0].stem, sources[0], props[0]))
     return candidates
 
 
-def object_surface_points(object_path: Path, transform_cfg: dict, sample_count: int, seed: int, mesh_scale: float):
-    if object_path.suffix.lower() == ".xml":
-        return object_points_from_mjcf(object_path, sample_count, seed, mesh_scale)
-    return object_points_from_obj(
-        object_path,
-        transform_cfg["output_up"],
-        transform_cfg["convert_y_up"],
-        sample_count,
-        seed,
-        transform_cfg["object_scale"],
-        mesh_scale,
-    )
+def load_true_scale_scene_source(args, frame_ids, source_slots, smpl_scale, ground_z, scene_anchors):
+    """Load every sequence object at its true size and source world pose.
 
-
-def load_scene_objects(args, frame_ids, ground_z: float, position_scale=1.0):
-    """Every object in the sequence at its REAL size, placed by ``position_scale``.
-
-    The mesh is never scaled. ``position_scale`` decides where the object stands:
-
-    * ``1.0`` (``real``) leaves the recorded trajectory untouched and the human is warped to meet
-      it instead.
-    * ``(s, s, 1)`` (``real_xy``) shrinks the scene's floor plan by the same factor as the human
-      while leaving every height exactly as recorded, so horizontal alignment holds for every
-      object on every frame without warping the human at all.
-
-    Each object keeps BOTH poses: the recorded one, which is where the human really touched it and
-    therefore where contacts are identified, and the placed one, which is what the robot has to
-    reach and must not penetrate. Under ``real`` the two are identical.
+    Objects receive the same ground shift as the human but no body scaling, so
+    object-object and object-ground placement is exactly the source's. Contacts
+    are detected between the unscaled human and the true-scale scene.
     """
     source_dir = resolve_object_contact_source_dir(args)
-    if source_dir is None:
-        return []
-    candidates = discover_scene_objects(source_dir, require_exact_prop=True)
+    candidates = [] if source_dir is None else discover_scene_objects(source_dir)
     if not candidates:
-        return []
-    transform_cfg = object_transform_config(args)
-    sample_count = int(args.object_contact_map_samples)
-    seed = int(args.seed)
-    objects = []
-    for name, object_path, prop_path in candidates:
-        points_local = object_surface_points(object_path, transform_cfg, sample_count, seed, 1.0)
-        motion = read_prop_motion(
-            prop_path,
-            frame_ids,
-            transform_cfg["output_up"],
-            transform_cfg["convert_y_up"],
-            transform_cfg["ground_align"],
-            transform_cfg["floor_y"],
-            transform_cfg["ground_offset"],
-            1.0,
-            position_scale=1.0,
-            z_offset=float(ground_z),
-        )
-        recorded = motion["positions"].astype(np.float32)
-        objects.append(
-            {
-                "name": name,
-                "path": object_path,
-                "prop_path": prop_path,
-                "points_local": points_local.astype(np.float32),
-                "positions": recorded,
-                "positions_recorded": recorded,
-                "rot_mats": motion["rot_mats"].astype(np.float32),
-                "quats_wxyz": motion["quats_wxyz"].astype(np.float32),
-            }
-        )
-    place_scene_objects(objects, position_scale, 0.0)
-    return objects
-
-
-def scene_centroid_xy(scene_objects):
-    """Ground centre of the scene: each object's mean position, averaged over objects.
-
-    Scaling the floor plan about this point instead of the world origin leaves the displacement
-    each object receives proportional to its distance from the SCENE rather than from wherever the
-    capture frame happened to put its origin. Objects are weighted equally, so a long-travelling
-    object does not drag the centre toward its own path.
-    """
-    if not scene_objects:
-        return np.zeros(2, dtype=np.float64)
-    per_object = [
-        np.asarray(scene_object["positions_recorded"], dtype=np.float64)[:, :2].mean(axis=0)
-        for scene_object in scene_objects
-    ]
-    return np.mean(np.stack(per_object, axis=0), axis=0)
-
-
-def place_scene_objects(scene_objects, position_scale, position_offset) -> None:
-    """Set each object's solved pose from its recorded one: ``p' = p * scale + offset``."""
-    scale_vector = np.asarray(position_scale, dtype=np.float64).reshape(-1)
-    if scale_vector.size == 1:
-        scale_vector = np.repeat(scale_vector, 3)
-    offset_vector = np.asarray(position_offset, dtype=np.float64).reshape(-1)
-    if offset_vector.size == 1:
-        offset_vector = np.repeat(offset_vector, 3)
-    for scene_object in scene_objects:
-        recorded = np.asarray(scene_object["positions_recorded"], dtype=np.float64)
-        scene_object["positions"] = (recorded * scale_vector[None, :] + offset_vector[None, :]).astype(np.float32)
-
-
-def scene_object_points_world(scene_objects, frame_idx: int, position_key: str = "positions"):
-    """Concatenated real-size surface samples of every object at one frame, with split offsets.
-
-    ``position_key`` selects the placed pose (``positions``) or the recorded one
-    (``positions_recorded``); they differ only when the floor plan is scaled.
-    """
-    clouds = []
-    offsets = []
-    total = 0
-    for scene_object in scene_objects:
-        rot = np.asarray(scene_object["rot_mats"][frame_idx], dtype=np.float64)
-        pos = np.asarray(scene_object[position_key][frame_idx], dtype=np.float64)
-        clouds.append(np.asarray(scene_object["points_local"], dtype=np.float64) @ rot.T + pos[None, :])
-        offsets.append(total)
-        total += len(clouds[-1])
-    return np.concatenate(clouds, axis=0), np.asarray(offsets, dtype=np.int64)
-
-
-def compute_contact_anchor_warp(human_points, scene_objects, smpl_scale, args, fps, fallback_xy):
-    """The ground point the human is scaled about, and the world shift that produces.
-
-    ``a(t)`` is the centroid of the real object points the human is touching, projected to z = 0
-    and recomputed every frame, so it follows an object that is lifted and carried. An object's
-    own frame origin is an arbitrary interior point and makes a measurably worse anchor.
-
-    Frames with no contact INTERPOLATE between the neighbouring engaged frames. Holding the last
-    anchor instead is fine when contact is continuous, but for a sequence that touches one object,
-    walks away, then touches another it parks the warp at the first object and forces a step at
-    re-engagement; interpolation spends that displacement on the walk, where nothing is touched.
-    """
-    n_frames = len(human_points)
-    n_objects = len(scene_objects)
-    anchor_raw = np.full((n_frames, 2), np.nan, dtype=np.float64)
-    engaged_counts = np.zeros((n_frames, max(n_objects, 1)), dtype=np.int32)
-    threshold = float(args.contact_anchor_threshold)
-    min_pairs = max(1, int(args.contact_anchor_min_pairs))
-    for frame_idx in range(n_frames):
-        cloud, offsets = scene_object_points_world(scene_objects, frame_idx, "positions_recorded")
-        distances, ids = cKDTree(cloud).query(np.asarray(human_points[frame_idx], dtype=np.float64), k=1)
-        ids = np.asarray(ids, dtype=np.int64)
-        near = np.asarray(distances, dtype=np.float64) <= threshold
-        near_count = int(np.count_nonzero(near))
-        if near_count >= min_pairs:
-            anchor_raw[frame_idx] = cloud[ids[near]][:, :2].mean(axis=0)
-        if near_count:
-            object_index = np.searchsorted(offsets, ids[near], side="right") - 1
-            for object_id in range(n_objects):
-                engaged_counts[frame_idx, object_id] = int(np.count_nonzero(object_index == object_id))
-
-    engaged = ~np.isnan(anchor_raw[:, 0])
-    if not np.any(engaged):
-        anchor_xy = np.repeat(np.asarray(fallback_xy, dtype=np.float64).reshape(1, 2), n_frames, axis=0)
-    else:
-        engaged_ids = np.flatnonzero(engaged).astype(np.float64)
-        frames = np.arange(n_frames, dtype=np.float64)
-        anchor_xy = np.stack(
-            [np.interp(frames, engaged_ids, anchor_raw[engaged, axis]) for axis in (0, 1)],
-            axis=1,
-        )
-
-    max_speed = float(args.contact_anchor_max_speed)
-    if max_speed > 0.0 and float(fps) > 0.0 and n_frames > 1:
-        limit = max_speed / float(fps)
-        limited = anchor_xy.copy()
-        for frame_idx in range(1, n_frames):
-            delta = limited[frame_idx] - limited[frame_idx - 1]
-            norm = float(np.linalg.norm(delta))
-            if norm > limit:
-                limited[frame_idx] = limited[frame_idx - 1] + delta * (limit / norm)
-        anchor_xy = limited
-
-    smoothed_xy = common.smooth_trajectory_lqr(
-        anchor_xy,
-        data_cost=1.0,
-        acceleration_cost=float(args.contact_anchor_smooth_acceleration_cost),
-        jerk_cost=float(args.contact_anchor_smooth_jerk_cost),
-    )
-    anchor = np.concatenate([smoothed_xy, np.zeros((n_frames, 1), dtype=np.float64)], axis=1)
-    shift = (1.0 - float(smpl_scale)) * anchor
-    speed = np.linalg.norm(np.diff(smoothed_xy, axis=0), axis=1) if n_frames > 1 else np.zeros(0)
-    per_object = ", ".join(
-        f"{scene_objects[object_id]['name']}={int(np.count_nonzero(engaged_counts[:, object_id] > 0))}"
-        for object_id in range(n_objects)
-    )
-    print(
-        f"[HumanoidRetarget][ContactAnchor] objects={n_objects} engaged_frames={int(np.count_nonzero(engaged))}/"
-        f"{n_frames} threshold={threshold:.4f} min_pairs={min_pairs} per_object_frames[{per_object}] "
-        f"anchor_speed_p95={float(np.percentile(speed, 95)) if speed.size else 0.0:.5f} "
-        f"max={float(speed.max()) if speed.size else 0.0:.5f} m/frame "
-        f"shift_norm min={float(np.linalg.norm(shift, axis=1).min()):.4f} "
-        f"max={float(np.linalg.norm(shift, axis=1).max()):.4f}"
-    )
-    return {
-        "anchor": anchor,
-        "shift": shift,
-        "engaged": engaged,
-        "engaged_counts": engaged_counts,
-    }
-
-
-def compute_contact_activation(distances, in_episode, threshold, release_scale, fade_frames):
-    """Per-slot contact weight in [0, 1], or None when every knob is at its no-op default.
-
-    Today a contact row appears at half weight the instant a slot crosses the threshold and
-    vanishes the instant it leaves. The hysteresis tail keeps a row alive at half weight while the
-    slot is still inside an episode, and the box filter turns both edges into linear ramps, so the
-    QP's weight schedule never steps.
-    """
-    if float(release_scale) <= 1.0 and int(fade_frames) <= 0:
-        return None
-    distances = np.asarray(distances, dtype=np.float64)
-    threshold = float(threshold)
-    raw = np.zeros_like(distances, dtype=np.float32)
-    strength = np.clip((threshold - distances) / max(threshold, 1e-8), 0.5, 1.0)
-    active = distances <= threshold
-    raw[active] = strength[active].astype(np.float32)
-    tail = (~active) & (distances <= threshold * float(release_scale)) & np.asarray(in_episode, dtype=bool)
-    raw[tail] = 0.5
-    fade_frames = int(fade_frames)
-    if fade_frames > 0:
-        width = 2 * fade_frames + 1
-        kernel = np.full(width, 1.0 / width, dtype=np.float64)
-        padded = np.pad(raw.astype(np.float64), ((fade_frames, fade_frames), (0, 0)), mode="edge")
-        smoothed = np.empty_like(raw, dtype=np.float64)
-        for slot in range(raw.shape[1]):
-            smoothed[:, slot] = np.convolve(padded[:, slot], kernel, mode="valid")
-        raw = smoothed.astype(np.float32)
-    return raw
-
-
-def build_real_object_contact_source(args, frame_ids, source_slots, smpl_scale, scene_objects, source_warp_shift):
-    """Contact pairs against real-size objects, found in the human's ORIGINAL geometry.
-
-    The source warp is inverted off the solved slots first, so each pair is the contact the real
-    human actually made, on the object point it actually touched. Distances and offsets are then
-    multiplied by ``smpl_scale`` and stored in ROBOT metres, so ``object_contact_map_threshold``
-    and ``_snap_threshold`` keep the meaning they were tuned with in the scaled world.
-
-    The robot target that comes out of this is ``object_point(t) + smpl_scale * human_offset``:
-    an object-LOCAL point at the object's real pose, so it follows the object rigidly through a
-    lift, a carry and a push.
-    """
-    if not scene_objects:
         print(
-            "[HumanoidRetarget][ObjectSource][WARN] no scene objects with a prop trajectory; "
-            "disabling object contact/robot-object constraints."
+            f"[HumanoidRetarget][Scene][WARN] no object XML/OBJ with prop_*.csv found in {source_dir}; "
+            "disabling object contact/robot-object/interaction-mesh terms."
         )
         args.object_contact_map_cost = 0.0
         args.robot_object_hard_constraint = False
         args.robot_object_penetration_soft_cost = 0.0
+        args.interaction_mesh_cost = 0.0
         return None
 
-    n_frames = len(frame_ids)
-    slot_count = int(source_slots.shape[1])
-    scale = float(smpl_scale)
-    shift = (
-        np.zeros((n_frames, 3), dtype=np.float64)
-        if source_warp_shift is None
-        else np.asarray(source_warp_shift, dtype=np.float64).reshape(n_frames, 3)
-    )
-    total_points = int(sum(len(scene_object["points_local"]) for scene_object in scene_objects))
-    points_world = np.empty((n_frames, total_points, 3), dtype=np.float32)
-    distances = np.empty((n_frames, slot_count), dtype=np.float32)
-    object_ids = np.empty((n_frames, slot_count), dtype=np.int32)
-    pair_vectors = np.empty((n_frames, slot_count, 3), dtype=np.float32)
-    snap_threshold = float(args.object_contact_map_snap_threshold)
-    threshold_robot = float(args.object_contact_map_threshold)
-    release_scale = max(1.0, float(args.object_contact_release_threshold_scale))
-    latch_pairs = bool(args.object_contact_pair_latch)
-    # Thresholds are stored in robot metres; the pairing itself happens in source metres.
-    enter_source = threshold_robot / scale
-    release_source = enter_source * release_scale
-    latched = np.full(slot_count, -1, dtype=np.int64)
-    in_episode = np.zeros((n_frames, slot_count), dtype=bool)
-    snapped_count = 0
-    relatched_count = 0
-    for frame_idx in range(n_frames):
-        # Contacts are identified against the object where it was RECORDED, because that is where
-        # the human really touched it. The robot is then driven to the same object-local point at
-        # the pose the object is PLACED at, which is the same thing under `real` and a shrunken
-        # floor plan under `real_xy`.
-        cloud, _offsets = scene_object_points_world(scene_objects, frame_idx, "positions_recorded")
-        placed, _placed_offsets = scene_object_points_world(scene_objects, frame_idx)
-        points_world[frame_idx] = placed.astype(np.float32)
-        slots_source = (np.asarray(source_slots[frame_idx], dtype=np.float64) - shift[frame_idx][None, :]) / scale
-        dist_near, ids_near = cKDTree(cloud).query(slots_source, k=1)
-        dist_near = np.asarray(dist_near, dtype=np.float64)
-        ids_near = np.asarray(ids_near, dtype=np.int64)
-        if latch_pairs:
-            # A slot holds the object-local point it first touched for as long as the episode
-            # lasts, so a 4 cm sample spacing cannot make the target hop every frame. It re-latches
-            # only when the human genuinely slid along the surface.
-            latched[dist_near > release_source] = -1
-            fresh = (dist_near <= enter_source) & (latched < 0)
-            latched[fresh] = ids_near[fresh]
-            held = latched >= 0
-            paired = np.where(held, latched, ids_near)
-            offsets = slots_source - cloud[paired]
-            stale = held & ((np.linalg.norm(offsets, axis=1) - dist_near) > 0.5 * enter_source)
-            relatched_count += int(stale.sum())
-            latched[stale] = ids_near[stale]
-            paired = np.where(latched >= 0, latched, ids_near)
-            in_episode[frame_idx] = latched >= 0
+    hsi = section(args.config_data, "hsi_hoi")
+    object_cfg = section(hsi, "object")
+    output_up = str(object_cfg.get("output_up", hsi.get("output_up", "z")))
+    convert_y_up = bool_config(object_cfg.get("convert_y_up"), True)
+    ground_align = bool_config(object_cfg.get("ground_align"), False)
+    floor_y = float(object_cfg.get("floor_y", 0.0))
+    ground_offset = float(object_cfg.get("ground_offset", 0.0))
+    object_scale = float(object_cfg.get("object_scale", 0.01))
+    sample_count = int(args.object_contact_map_samples)
+    seed = int(args.seed)
+
+    objects = []
+    for object_name, object_path, prop_path in candidates:
+        if object_path.suffix.lower() == ".xml":
+            points_local = object_points_from_mjcf(object_path, sample_count, seed, 1.0)
         else:
-            paired = ids_near
-            in_episode[frame_idx] = dist_near <= enter_source
-        vectors = (slots_source - cloud[paired]) * scale
-        dist = dist_near * scale
-        if snap_threshold > 0.0:
-            snap_mask = dist < snap_threshold
-            snapped_count += int(snap_mask.sum())
-            vectors[snap_mask] = 0.0
-            dist[snap_mask] = 0.0
-        distances[frame_idx] = dist.astype(np.float32)
-        object_ids[frame_idx] = paired.astype(np.int32)
-        pair_vectors[frame_idx] = vectors.astype(np.float32)
+            points_local = object_points_from_obj(
+                object_path, output_up, convert_y_up, sample_count, seed, object_scale, 1.0
+            )
+        motion = read_prop_motion(
+            prop_path, frame_ids, output_up, convert_y_up, ground_align, floor_y, ground_offset, 1.0
+        )
+        positions = motion["positions"].astype(np.float32).copy()
+        positions[:, 2] -= float(ground_z)
+        points_world = (
+            np.einsum("tij,pj->tpi", motion["rot_mats"].astype(np.float32), points_local.astype(np.float32))
+            + positions[:, None, :]
+        )
+        extent = points_local.max(axis=0) - points_local.min(axis=0)
+        print(
+            f"[HumanoidRetarget][Scene] object={object_name} source={object_path} points={len(points_local)} "
+            f"extent={np.round(extent, 4).tolist()} z_range=[{float(points_world[..., 2].min()):.4f}, "
+            f"{float(points_world[..., 2].max()):.4f}] travel={float(np.ptp(positions, axis=0).max()):.4f}"
+        )
+        objects.append(
+            {
+                "name": object_name,
+                "path": object_path,
+                "prop_path": prop_path,
+                "points_local": points_local.astype(np.float32),
+                "points_world": points_world.astype(np.float32),
+                "positions": positions,
+                "quats_wxyz": motion["quats_wxyz"].astype(np.float32),
+            }
+        )
 
-    activation = compute_contact_activation(
-        distances,
-        in_episode,
-        threshold_robot,
-        release_scale,
-        int(args.object_contact_fade_frames),
+    scene_points_world = np.concatenate([obj["points_world"] for obj in objects], axis=1)
+    point_object_index = np.concatenate(
+        [np.full(len(obj["points_local"]), idx, dtype=np.int32) for idx, obj in enumerate(objects)]
     )
-
-    positions = np.stack([scene_object["positions"] for scene_object in scene_objects], axis=1).astype(np.float32)
-    quats = np.stack([scene_object["quats_wxyz"] for scene_object in scene_objects], axis=1).astype(np.float32)
-    active_counts = (distances <= float(args.object_contact_map_threshold)).sum(axis=1)
-    names = "+".join(scene_object["name"] for scene_object in scene_objects)
+    source_slots_world = hoi_scene.unscale_about_anchors(source_slots, scene_anchors, smpl_scale)
+    distances, object_ids, pair_vectors, snapped_count = hoi_scene.compute_scene_contact_map(
+        source_slots_world,
+        scene_points_world,
+        smpl_scale,
+        float(args.object_contact_map_snap_threshold),
+    )
+    active = distances <= float(args.object_contact_map_threshold)
+    per_object_active = [
+        int((active & (point_object_index[object_ids] == idx)).sum()) for idx in range(len(objects))
+    ]
+    active_counts = active.sum(axis=1)
     print(
-        f"[HumanoidRetarget][ObjectContactMap] objects={len(scene_objects)} [{names}] "
-        f"object_points={total_points}, slots={slot_count}, frames={n_frames}, "
-        f"surface_method=first_hit, source_mesh_scale=1.000000, retarget_mesh_scale=1.000000, "
-        f"retarget_object_size={str(args.retarget_object_size).lower()}, min={float(distances.min()):.4f}, "
-        f"p5={float(np.percentile(distances, 5)):.4f}, p50={float(np.percentile(distances, 50)):.4f}, "
-        f"max={float(distances.max()):.4f}, snap<{snap_threshold:.4f}m={snapped_count}/{distances.size}, "
+        f"[HumanoidRetarget][ObjectContactMap] scene_mode=true_scale objects={[obj['name'] for obj in objects]} "
+        f"scene_points={scene_points_world.shape[1]} slots={source_slots.shape[1]} frames={len(frame_ids)} "
+        f"anchor={args.true_scale_anchor} body_scale={float(smpl_scale):.6f} object_scale=1.0 "
+        f"min={float(distances.min()):.4f}, p50={float(np.percentile(distances, 50)):.4f}, "
+        f"snap<{float(args.object_contact_map_snap_threshold):.4f}m={snapped_count}/{distances.size}, "
         f"active min/mean/max={int(active_counts.min())}/{float(active_counts.mean()):.2f}/{int(active_counts.max())}, "
-        f"max_points={int(args.object_contact_map_max_points)}, latch={latch_pairs}, relatched={relatched_count}, "
-        f"release_scale={release_scale:.2f}, fade_frames={int(args.object_contact_fade_frames)}"
+        f"active_slot_frames_per_object={per_object_active}"
     )
-    empty_local = np.zeros((0, 3), dtype=np.float32)
+    first = objects[0]
     return {
-        "name": names,
-        "path": Path(scene_objects[0]["path"]),
-        "prop_path": Path(scene_objects[0]["prop_path"]),
-        "objects": scene_objects,
+        "name": "+".join(obj["name"] for obj in objects),
+        "path": first["path"],
+        "prop_path": first["prop_path"],
+        "scene_mode": "true_scale",
+        "objects": objects,
+        "point_object_index": point_object_index,
         "source_mesh_scale": 1.0,
         "retarget_mesh_scale": 1.0,
-        "retarget_object_size": "real",
-        "source_points_local": empty_local,
-        "source_points_world": points_world,
-        "retarget_points_local": empty_local,
-        "retarget_points_world": points_world,
+        "retarget_object_size": "original",
+        "source_slots_world": source_slots_world,
+        "retarget_points_world": scene_points_world.astype(np.float32),
         "distances": distances,
         "object_ids": object_ids,
         "pair_vectors": pair_vectors,
-        "motion_positions": positions,
-        "motion_quats_wxyz": quats,
-        "activation": activation,
+        "motion_positions": first["positions"],
+        "motion_quats_wxyz": first["quats_wxyz"],
+        "object_poses": np.stack(
+            [np.concatenate([obj["positions"], obj["quats_wxyz"]], axis=1) for obj in objects], axis=1
+        ).astype(np.float64),
     }
 
 
-def load_object_contact_source(
-    args,
-    frame_ids,
-    source_slots,
-    smpl_scale,
-    ground_z,
-    scene_objects=None,
-    source_warp_shift=None,
-):
+def load_object_contact_source(args, frame_ids, source_slots, smpl_scale, ground_z, scene_anchors=None):
+    if hoi_scene.resolve_scene_mode(getattr(args, "retarget_scene_mode", "scaled")) == "true_scale":
+        return load_true_scale_scene_source(args, frame_ids, source_slots, smpl_scale, ground_z, scene_anchors)
     needs_object_contact = float(args.object_contact_map_cost) > 0.0
     needs_robot_object = (
         bool(getattr(args, "robot_object_hard_constraint", False))
@@ -1687,15 +1373,6 @@ def load_object_contact_source(
     )
     if not needs_object_contact and not needs_robot_object:
         return None
-    if str(args.retarget_object_size).lower() in {"real", "real_xy"}:
-        return build_real_object_contact_source(
-            args,
-            frame_ids,
-            source_slots,
-            smpl_scale,
-            scene_objects,
-            source_warp_shift,
-        )
     source_dir = resolve_object_contact_source_dir(args)
     if source_dir is None:
         print("[HumanoidRetarget][ObjectSource][WARN] no source object directory; disabling object contact/robot-object constraints.")
@@ -1728,6 +1405,12 @@ def load_object_contact_source(
     if retarget_object_size not in {"scaled", "original"}:
         raise ValueError(f"retarget_object_size must be 'scaled' or 'original', got {args.retarget_object_size!r}")
     retarget_mesh_scale = 1.0 if retarget_object_size == "original" else float(smpl_scale)
+    if retarget_object_size == "original":
+        print(
+            "[HumanoidRetarget][ObjectContactMap][WARN] retarget_object_size=original keeps the object "
+            "trajectory scaled while restoring its mesh size, which misplaces contacts and object-ground "
+            "placement; use retarget_scene_mode=true_scale for true-size scenes."
+        )
     sample_count = int(args.object_contact_map_samples)
     seed = int(args.seed)
     if object_path.suffix.lower() == ".xml":
@@ -1840,34 +1523,17 @@ def robot_object_collision_geom_ids(model) -> np.ndarray:
     return np.asarray(geom_ids, dtype=np.int32)
 
 
-def prefix_mjcf_names(object_root: ET.Element, name_prefix: str) -> None:
-    """Prefix every asset/body/geom/joint name so several object MJCFs can share one model.
+MJCF_NAME_REFERENCE_ATTRS = ("mesh", "material", "texture", "hfield", "body1", "body2", "joint", "geom", "site")
 
-    Two object files are written independently and may reuse a name; MuJoCo rejects the merge.
-    An empty prefix leaves the tree untouched, which is what the single-object modes pass.
-    """
-    if not name_prefix:
-        return
-    mesh_renames = {}
-    for asset in object_root.findall("asset"):
-        for mesh in asset.findall("mesh"):
-            name = mesh.get("name")
-            if name:
-                mesh_renames[name] = f"{name_prefix}{name}"
-                mesh.set("name", mesh_renames[name])
-    for body in object_root.iter("body"):
-        if body.get("name"):
-            body.set("name", f"{name_prefix}{body.get('name')}")
-    for geom in object_root.iter("geom"):
-        if geom.get("name"):
-            geom.set("name", f"{name_prefix}{geom.get('name')}")
-        mesh_ref = geom.get("mesh")
-        if mesh_ref in mesh_renames:
-            geom.set("mesh", mesh_renames[mesh_ref])
-    for tag in ("freejoint", "joint"):
-        for joint in object_root.iter(tag):
-            if joint.get("name"):
-                joint.set("name", f"{name_prefix}{joint.get('name')}")
+
+def prefix_mjcf_names(root: ET.Element, prefix: str) -> None:
+    """Prefix element names and same-file references so several objects can share one model."""
+    for element in root.iter():
+        if element.get("name"):
+            element.set("name", f"{prefix}{element.get('name')}")
+        for attr in MJCF_NAME_REFERENCE_ATTRS:
+            if element.get(attr):
+                element.set(attr, f"{prefix}{element.get(attr)}")
 
 
 def append_object_mjcf_to_robot_root(
@@ -1875,12 +1541,13 @@ def append_object_mjcf_to_robot_root(
     object_xml_path: Path,
     object_mesh_scale: float,
     name_prefix: str = "",
-) -> None:
+) -> list[str]:
     object_xml_path = Path(object_xml_path).resolve()
     object_root = ET.parse(object_xml_path).getroot()
     make_mjcf_mesh_paths_absolute(object_root, object_xml_path)
     scale_mjcf_mesh_assets(object_root, object_mesh_scale)
-    prefix_mjcf_names(object_root, name_prefix)
+    if name_prefix:
+        prefix_mjcf_names(object_root, name_prefix)
 
     robot_asset = robot_root.find("asset")
     if robot_asset is None:
@@ -1892,12 +1559,20 @@ def append_object_mjcf_to_robot_root(
     robot_worldbody = robot_root.find("worldbody")
     if robot_worldbody is None:
         robot_worldbody = ET.SubElement(robot_root, "worldbody")
+    freejoint_names = []
     for object_worldbody in object_root.findall("worldbody"):
         for body in list(object_worldbody):
-            if body.find("./freejoint") is None and body.find("./joint[@type='free']") is None:
-                joint_name = f"{body.get('name', 'object')}_freejoint"
-                body.insert(0, ET.Element("freejoint", {"name": joint_name}))
+            joint = body.find("./freejoint")
+            if joint is None:
+                joint = body.find("./joint[@type='free']")
+            if joint is None:
+                joint = ET.Element("freejoint", {"name": f"{body.get('name', 'object')}_freejoint"})
+                body.insert(0, joint)
+            elif not joint.get("name"):
+                joint.set("name", f"{name_prefix}{body.get('name', 'object')}_freejoint")
+            freejoint_names.append(joint.get("name"))
             robot_worldbody.append(body)
+    return freejoint_names
 
 
 def build_robot_object_penetration_cache(robot_xml: Path, object_source, main_model, args):
@@ -1913,34 +1588,51 @@ def build_robot_object_penetration_cache(robot_xml: Path, object_source, main_mo
         args.robot_object_penetration_soft_cost = 0.0
         return None
     scene_objects = object_source.get("objects")
-    if scene_objects:
-        entries = [(f"{scene_object['name']}__", Path(scene_object["path"])) for scene_object in scene_objects]
+    multi_object = scene_objects is not None
+    if multi_object:
+        xml_objects = [
+            (idx, Path(obj["path"])) for idx, obj in enumerate(scene_objects) if Path(obj["path"]).suffix.lower() == ".xml"
+        ]
+        skipped = [obj["name"] for obj in scene_objects if Path(obj["path"]).suffix.lower() != ".xml"]
+        if skipped:
+            print(
+                f"[HumanoidRetarget][RobotObjectPenetration][WARN] objects without MJCF collision geometry "
+                f"are not collision-checked: {skipped}"
+            )
+        if not xml_objects:
+            print("[HumanoidRetarget][RobotObjectPenetration][WARN] no XML scene objects; disabling robot-object penetration terms.")
+            args.robot_object_hard_constraint = False
+            args.robot_object_penetration_soft_cost = 0.0
+            return None
+        object_xml = xml_objects[0][1]
     else:
-        entries = [("", Path(object_source["path"]))]
-    xml_entries = [(prefix, path) for prefix, path in entries if path.suffix.lower() == ".xml"]
-    skipped = [path for _prefix, path in entries if path.suffix.lower() != ".xml"]
-    for path in skipped:
-        print(
-            f"[HumanoidRetarget][RobotObjectPenetration][WARN] object path is not XML: {path}; "
-            "it contributes contact rows but no penetration constraint."
-        )
-    if not xml_entries:
-        print(
-            "[HumanoidRetarget][RobotObjectPenetration][WARN] no object MJCF available; "
-            "disabling robot-object penetration terms."
-        )
-        args.robot_object_hard_constraint = False
-        args.robot_object_penetration_soft_cost = 0.0
-        return None
+        object_xml = Path(object_source["path"])
+        if object_xml.suffix.lower() != ".xml":
+            print(
+                f"[HumanoidRetarget][RobotObjectPenetration][WARN] object path is not XML: {object_xml}; "
+                "disabling robot-object penetration terms."
+            )
+            args.robot_object_hard_constraint = False
+            args.robot_object_penetration_soft_cost = 0.0
+            return None
 
     robot_root = ET.parse(robot_xml).getroot()
     make_mjcf_mesh_paths_absolute(robot_root, robot_xml)
-    for name_prefix, object_xml in xml_entries:
+    object_freejoints = []
+    if multi_object:
+        for idx, xml_path in xml_objects:
+            names = append_object_mjcf_to_robot_root(
+                robot_root,
+                xml_path,
+                object_mesh_scale=float(object_source.get("retarget_mesh_scale", 1.0)),
+                name_prefix=f"scene{idx}_" if len(scene_objects) > 1 else "",
+            )
+            object_freejoints.append((idx, names))
+    else:
         append_object_mjcf_to_robot_root(
             robot_root,
             object_xml,
             object_mesh_scale=float(object_source.get("retarget_mesh_scale", 1.0)),
-            name_prefix=name_prefix,
         )
     # Keep the temporary MJCF beside the selected robot XML so relative MJCF
     # includes (for example ``assets.xml``) retain their original base path.
@@ -1967,12 +1659,22 @@ def build_robot_object_penetration_cache(robot_xml: Path, object_source, main_mo
             free_qpos_addrs.append(qadr)
     if not free_qpos_addrs:
         print(
-            "[HumanoidRetarget][RobotObjectPenetration][WARN] no appended object freejoint found in "
-            f"{[str(path) for _prefix, path in xml_entries]}; disabling robot-object penetration terms."
+            f"[HumanoidRetarget][RobotObjectPenetration][WARN] no appended object freejoint found in {object_xml}; "
+            "disabling robot-object penetration terms."
         )
         args.robot_object_hard_constraint = False
         args.robot_object_penetration_soft_cost = 0.0
         return None
+
+    # (object pose index, qpos address) for every appended object freejoint.
+    object_qadrs = [(0, int(free_qpos_addrs[0]))]
+    if multi_object:
+        object_qadrs = []
+        for idx, names in object_freejoints:
+            for name in names:
+                joint_id = mujoco.mj_name2id(penetration_model, mujoco.mjtObj.mjOBJ_JOINT, name)
+                if joint_id >= 0:
+                    object_qadrs.append((int(idx), int(penetration_model.jnt_qposadr[joint_id])))
 
     robot_geom_ids = robot_object_collision_geom_ids(main_model)
     robot_geom_ids = robot_geom_ids[robot_geom_ids < penetration_model.ngeom].astype(np.int32)
@@ -2004,16 +1706,15 @@ def build_robot_object_penetration_cache(robot_xml: Path, object_source, main_mo
         f"threshold={float(args.robot_object_threshold):.4f} "
         f"slack={bool(args.robot_object_hard_slack)} "
         f"slack_cost={float(args.robot_object_hard_slack_cost):.4f} "
-        f"objects={len(xml_entries)} robot_geoms={robot_geom_ids.size} object_geoms={object_geom_ids.size} "
-        f"max_pairs={int(args.robot_object_max_pairs)}"
+        f"robot_geoms={robot_geom_ids.size} object_geoms={object_geom_ids.size} "
+        f"objects={len(object_qadrs)} max_pairs={int(args.robot_object_max_pairs)}"
     )
     return {
         "model": penetration_model,
         "data": mujoco.MjData(penetration_model),
         "robot_nq": int(main_model.nq),
         "robot_nv": int(main_model.nv),
-        "object_qadr": int(free_qpos_addrs[0]),
-        "object_qadrs": [int(addr) for addr in free_qpos_addrs],
+        "object_qadrs": object_qadrs,
         "robot_geom_ids": robot_geom_ids,
         "object_geom_ids": object_geom_ids.astype(np.int32),
         "labels": common.geom_collision_labels(penetration_model),
@@ -2027,14 +1728,12 @@ def compute_robot_object_penetration_rows(qpos, object_pose_wxyz, cache, margin,
     penetration_data = cache["data"]
     robot_nq = int(cache["robot_nq"])
     robot_nv = int(cache["robot_nv"])
-    object_qadrs = [int(addr) for addr in cache.get("object_qadrs", [cache["object_qadr"]])]
-    # One pose row per appended object; a single-object source arrives as a flat 7-vector.
-    object_poses = np.asarray(object_pose_wxyz, dtype=np.float64).reshape(-1, 7)
+    object_poses_wxyz = np.asarray(object_pose_wxyz, dtype=np.float64).reshape(-1, 7)
 
     mujoco.mj_resetData(penetration_model, penetration_data)
     penetration_data.qpos[:robot_nq] = np.asarray(qpos, dtype=np.float64)[:robot_nq]
-    for object_qadr, object_pose in zip(object_qadrs, object_poses):
-        penetration_data.qpos[object_qadr : object_qadr + 7] = object_pose
+    for pose_idx, object_qadr in cache["object_qadrs"]:
+        penetration_data.qpos[object_qadr : object_qadr + 7] = object_poses_wxyz[pose_idx]
     mujoco.mj_forward(penetration_model, penetration_data)
 
     activation_distance = max(float(threshold), float(margin), 0.0)
@@ -2107,29 +1806,88 @@ def compute_robot_object_penetration_rows(qpos, object_pose_wxyz, cache, margin,
     return jacobians, distances
 
 
-def update_ground_contact_anchors(
-    model,
-    data,
-    qpos,
-    robot_template,
-    active_slot_ids,
-    anchor_state,
-    retain_slot_ids=None,
-):
-    """Latch a world XY under every slot the source says is on the floor.
+OBJECT_CONTACT_EVAL_THRESHOLD = 0.02
+OBJECT_NEAR_EVAL_THRESHOLD = 0.10
 
-    ``retain_slot_ids`` keeps an already-latched anchor alive while its slot stays near the floor
-    but is no longer exactly snapped to it. Without it, a millimetre of source noise deletes the
-    anchor and re-creates it at wherever the foot has drifted to, which is a micro-slide the foot
-    term itself cannot see. Passing None reproduces the strict latch.
+
+def evaluate_object_contacts(model, data, robot_template, qpos_seq, object_source, penetration_cache):
+    """Per-frame contact-target error and deepest robot-object penetration.
+
+    Contact slots are within 2 cm of an object in the source; near slots are
+    within 10 cm and measure how well approach/hover relations are kept.
     """
+    frame_count = len(qpos_seq)
+    contact_error = np.zeros(frame_count, dtype=np.float32)
+    contact_count = np.zeros(frame_count, dtype=np.int32)
+    min_distance = np.zeros(frame_count, dtype=np.float32)
+    all_errors = []
+    near_errors = []
+    near_bodies = []
+    slot_body_ids = np.asarray(model.geom_bodyid, dtype=np.int32)[np.asarray(robot_template["geom_ids"], dtype=np.int32)]
+    for frame_idx in range(frame_count):
+        qpos = np.asarray(qpos_seq[frame_idx], dtype=np.float64)
+        frame_distances = object_source["distances"][frame_idx]
+        near = np.where(frame_distances <= OBJECT_NEAR_EVAL_THRESHOLD)[0].astype(np.int32)
+        if near.size > 0:
+            common.set_qpos(model, data, qpos)
+            robot_points = common.template_points_to_world(data, robot_template, near)
+            targets = (
+                object_source["retarget_points_world"][frame_idx][object_source["object_ids"][frame_idx, near]]
+                + object_source["pair_vectors"][frame_idx, near]
+            )
+            errors = np.linalg.norm(robot_points - targets, axis=1)
+            near_errors.append(errors)
+            near_bodies.append(slot_body_ids[near])
+            in_contact = frame_distances[near] <= OBJECT_CONTACT_EVAL_THRESHOLD
+            if np.any(in_contact):
+                contact_error[frame_idx] = float(errors[in_contact].mean())
+                contact_count[frame_idx] = int(in_contact.sum())
+                all_errors.append(errors[in_contact])
+        if penetration_cache is not None:
+            poses = object_source.get("object_poses")
+            pose = (
+                poses[frame_idx]
+                if poses is not None
+                else np.concatenate([object_source["motion_positions"][frame_idx], object_source["motion_quats_wxyz"][frame_idx]])
+            )
+            _jac, distances = compute_robot_object_penetration_rows(
+                qpos, pose, penetration_cache, margin=0.0, threshold=0.0, max_pairs=0
+            )
+            min_distance[frame_idx] = min(0.0, min(distances)) if distances else 0.0
+    errors = hoi_scene.summarize(np.concatenate(all_errors) if all_errors else [])
+    near = hoi_scene.summarize(np.concatenate(near_errors) if near_errors else [])
+    worst_bodies = ""
+    if near_errors:
+        body_ids = np.concatenate(near_bodies)
+        body_errors = np.concatenate(near_errors)
+        by_body = [
+            (float(body_errors[body_ids == body_id].mean()), int(body_id))
+            for body_id in np.unique(body_ids)
+        ]
+        worst_bodies = ", ".join(
+            f"{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)}={err:.3f}"
+            for err, body_id in sorted(by_body, reverse=True)[:4]
+        )
+    return {
+        "contact_error": contact_error,
+        "contact_count": contact_count,
+        "min_distance": min_distance,
+        "summary": (
+            f"contact_slot_frames={errors['count']} target_error mean={errors['mean']:.4f} "
+            f"p95={errors['p95']:.4f} max={errors['max']:.4f} "
+            f"near_slot_frames={near['count']} near_error mean={near['mean']:.4f} p95={near['p95']:.4f} "
+            f"penetration_frames={int((min_distance < -1e-4).sum())}/{frame_count} "
+            f"max_penetration={float(-min_distance.min(initial=0.0)):.4f} "
+            f"worst_near_bodies=[{worst_bodies}]"
+        ),
+    }
+
+
+def update_ground_contact_anchors(model, data, qpos, robot_template, active_slot_ids, anchor_state):
     active_slot_ids = np.asarray(active_slot_ids, dtype=np.int32).reshape(-1)
     active_set = {int(slot_id) for slot_id in active_slot_ids}
-    retain_set = active_set if retain_slot_ids is None else active_set | {
-        int(slot_id) for slot_id in np.asarray(retain_slot_ids, dtype=np.int32).reshape(-1)
-    }
     for slot_id in list(anchor_state):
-        if int(slot_id) not in retain_set:
+        if int(slot_id) not in active_set:
             del anchor_state[int(slot_id)]
     new_slot_ids = np.asarray(
         [int(slot_id) for slot_id in active_slot_ids if int(slot_id) not in anchor_state],
@@ -2142,187 +1900,6 @@ def update_ground_contact_anchors(
     for slot_id, point in zip(new_slot_ids, new_points):
         target = np.asarray([point[0], point[1], 0.0], dtype=np.float64)
         anchor_state[int(slot_id)] = target
-
-
-def reproject_qpos_to_constraints(
-    model,
-    data,
-    qpos_seq,
-    robot_template,
-    args,
-    object_contact_source,
-    robot_object_penetration_cache,
-    joint_limits_by_qpos=None,
-    robot_self_penetration_cache=None,
-):
-    """Push a filtered trajectory back onto the hard constraints, by the smallest step that works.
-
-    The trajectory filter runs AFTER the constrained solve and knows nothing about the floor or
-    the objects, so it can sink a foot or push a hand into a mesh. This pass solves, per frame,
-    ``min |dq|^2`` subject to the same ground and robot-object inequalities the solver used. On a
-    frame that violates nothing the optimum is ``dq = 0``, so the filter's smoothness survives
-    everywhere it was already feasible.
-
-    The soft terms are deliberately absent: re-introducing them here would move frames that were
-    fine and undo the filter.
-    """
-    iters = int(getattr(args, "trajectory_filter_reproject_iters", 3))
-    tolerance = float(getattr(args, "trajectory_filter_reproject_tolerance", 1e-4))
-    if iters <= 0:
-        return qpos_seq, {"frames": 0, "max_step": 0.0, "max_violation_before": 0.0, "max_violation_after": 0.0}
-
-    ground_hard = bool(args.ground_penetration_hard_constraint) and str(
-        args.ground_penetration_hard_constraint_mode
-    ) in {"surface_slots", "surface_slots_all"}
-    object_hard = bool(args.robot_object_hard_constraint) and robot_object_penetration_cache is not None
-    self_hard = bool(args.robot_self_penetration_hard_constraint) and robot_self_penetration_cache is not None
-    if not ground_hard and not object_hard and not self_hard:
-        return qpos_seq, {"frames": 0, "max_step": 0.0, "max_violation_before": 0.0, "max_violation_after": 0.0}
-
-    # A plain minimum-norm step resolves a hand pressed into an object by translating the whole
-    # robot, which is the cheapest direction and exactly the wrong one: it lurches the body the
-    # filter just smoothed. Weighting the free joint makes the arm yield instead.
-    root_weight = max(float(getattr(args, "trajectory_filter_reproject_root_weight", 10.0)), 1e-6)
-    step_weights = np.ones(model.nv, dtype=np.float64)
-    root_translation_ids, root_rotation_ids = common.root_qvel_dof_groups(model)
-    root_ids = np.concatenate([root_translation_ids, root_rotation_ids]).astype(np.int32)
-    if root_ids.size:
-        step_weights[root_ids] = root_weight
-    weight_matrix = np.diag(step_weights)
-
-    ground_margin = float(args.ground_penetration_margin)
-    ground_slack = float(args.ground_penetration_hard_slack_cost) if bool(args.ground_penetration_hard_slack) else 0.0
-    object_margin = float(args.robot_object_margin)
-    object_slack = float(args.robot_object_hard_slack_cost) if bool(args.robot_object_hard_slack) else 0.0
-    self_margin = float(args.robot_self_penetration_margin)
-    self_slack = float(args.robot_self_penetration_hard_slack_cost) if bool(args.robot_self_penetration_hard_slack) else 0.0
-    all_slot_ids = np.arange(len(robot_template["geom_ids"]), dtype=np.int32)
-
-    qpos_seq = np.asarray(qpos_seq, dtype=np.float64).copy()
-    before_repair = qpos_seq.copy()
-    moved_frames = 0
-    max_step = 0.0
-    max_violation_before = 0.0
-    max_violation_after = 0.0
-    for frame_idx in range(len(qpos_seq)):
-        qpos = qpos_seq[frame_idx].copy()
-        object_poses = None
-        if object_hard and object_contact_source is not None:
-            object_poses = np.concatenate(
-                [
-                    np.asarray(object_contact_source["motion_positions"][frame_idx], dtype=np.float64).reshape(-1, 3),
-                    np.asarray(object_contact_source["motion_quats_wxyz"][frame_idx], dtype=np.float64).reshape(-1, 4),
-                ],
-                axis=1,
-            )
-        frame_moved = False
-        for _iteration in range(iters):
-            common.set_qpos(model, data, qpos)
-            slot_cache = common.TemplateSlotKinematicsCache(model, data, robot_template)
-            ineq_rows, ineq_bounds, ineq_soft_costs = [], [], []
-            violation = 0.0
-            if ground_hard:
-                candidate_z = common.template_points_world_z(data, robot_template, all_slot_ids)
-                constraint_slot_ids, constraint_z = ground_penetration_constraint_slots(
-                    candidate_z,
-                    all_slot_ids,
-                    args.ground_penetration_max_points,
-                    args.ground_penetration_threshold,
-                    margin=ground_margin,
-                )
-                for point_z, slot_id in zip(constraint_z, constraint_slot_ids):
-                    jac = slot_cache.point_jacobian(int(slot_id))
-                    ineq_rows.append(-jac[2])
-                    ineq_bounds.append(float(point_z) - ground_margin)
-                    ineq_soft_costs.append(ground_slack)
-                    violation = max(violation, ground_margin - float(point_z))
-            if self_hard:
-                jacobians_self, distances_self = common.compute_robot_self_penetration_rows(
-                    model, data, robot_self_penetration_cache, float(args.collision_threshold)
-                )
-                for jac, phi in zip(jacobians_self, distances_self):
-                    ineq_rows.append(-np.asarray(jac, dtype=np.float64).reshape(model.nv))
-                    ineq_bounds.append(float(phi) - self_margin)
-                    ineq_soft_costs.append(self_slack)
-                    violation = max(violation, self_margin - float(phi))
-            if object_hard and object_poses is not None:
-                jacobians, distances = compute_robot_object_penetration_rows(
-                    qpos,
-                    object_poses,
-                    robot_object_penetration_cache,
-                    margin=object_margin,
-                    threshold=float(args.robot_object_threshold),
-                    max_pairs=int(args.robot_object_max_pairs),
-                )
-                for jac, phi in zip(jacobians, distances):
-                    ineq_rows.append(-np.asarray(jac, dtype=np.float64).reshape(model.nv))
-                    ineq_bounds.append(float(phi) - object_margin)
-                    ineq_soft_costs.append(object_slack)
-                    violation = max(violation, object_margin - float(phi))
-            if _iteration == 0:
-                max_violation_before = max(max_violation_before, violation)
-            if not ineq_rows or violation <= tolerance:
-                max_violation_after = max(max_violation_after, violation)
-                break
-            step_lower, step_upper = common.qvel_step_bounds(
-                model,
-                qpos,
-                args.max_dq,
-                joint_limits_by_qpos=joint_limits_by_qpos,
-                use_step_box=False,
-            )
-            dq = common.solve_clarabel_qp_step(
-                weight_matrix,
-                np.zeros(model.nv, dtype=np.float64),
-                args.damping,
-                step_lower,
-                step_upper,
-                ineq_A=np.asarray(ineq_rows, dtype=np.float64),
-                ineq_b=np.asarray(ineq_bounds, dtype=np.float64),
-                ineq_soft_costs=np.asarray(ineq_soft_costs, dtype=np.float64),
-                l2_step_limits=[],
-            )
-            step_norm = float(np.linalg.norm(dq))
-            if step_norm <= 1e-12:
-                max_violation_after = max(max_violation_after, violation)
-                break
-            mujoco.mj_integratePos(model, qpos, dq, 1.0)
-            qpos = common.clamp_joint_ranges(model, qpos, joint_limits_by_qpos=joint_limits_by_qpos)
-            max_step = max(max_step, step_norm)
-            frame_moved = True
-        else:
-            max_violation_after = max(max_violation_after, violation)
-        if frame_moved:
-            moved_frames += 1
-            qpos_seq[frame_idx] = qpos
-
-    # Each frame was repaired on its own, so as a signal over time the CORRECTION is high
-    # frequency: applied raw it undoes what the trajectory filter just did, measured here as 6x
-    # the arm acceleration and 9x the wrist acceleration. Smoothing the correction rather than the
-    # trajectory keeps the repair and drops its jitter. 0 reproduces the unsmoothed behaviour.
-    smooth_cost = float(getattr(args, "trajectory_filter_reproject_smooth_cost", 0.0))
-    if smooth_cost > 0.0 and moved_frames and len(qpos_seq) > 3:
-        joint_addrs, _vaddrs, _ranges, _names = common.scalar_qpos_joint_addrs(model)
-        columns = sorted({0, 1, 2} | {int(addr) for addr in joint_addrs})
-        columns = [c for c in columns if 0 <= c < qpos_seq.shape[1]]
-        correction = common.smooth_trajectory_lqr(
-            qpos_seq[:, columns] - before_repair[:, columns],
-            data_cost=1.0,
-            acceleration_cost=smooth_cost,
-            jerk_cost=smooth_cost * 0.25,
-        )
-        qpos_seq[:, columns] = before_repair[:, columns] + correction
-        for frame_idx in range(len(qpos_seq)):
-            qpos_seq[frame_idx] = common.clamp_joint_ranges(
-                model, qpos_seq[frame_idx], joint_limits_by_qpos=joint_limits_by_qpos
-            )
-
-    return qpos_seq, {
-        "frames": moved_frames,
-        "max_step": max_step,
-        "max_violation_before": max_violation_before,
-        "max_violation_after": max_violation_after,
-    }
 
 
 def solve_frame_body_segment_qp(
@@ -2352,6 +1929,7 @@ def solve_frame_body_segment_qp(
     ground_penetration_collision_cache=None,
     robot_object_penetration_cache=None,
     ground_contact_anchor_state=None,
+    joint_couplings=None,
 ):
     qpos = qpos_init.copy()
     costs = []
@@ -2396,15 +1974,6 @@ def solve_frame_body_segment_qp(
             rank_distances=weight_distances_for_contact,
             candidate_slot_ids=selected_slot_ids,
         )
-    anchor_release = float(getattr(args, "ground_contact_anchor_release_threshold", 0.0))
-    retained_anchor_slots = None
-    if (
-        anchor_release > 0.0
-        and target_distances_for_contact is not None
-        and float(args.ground_contact_anchor_cost) > 0.0
-    ):
-        candidate_slots = np.asarray(selected_slot_ids, dtype=np.int32).reshape(-1)
-        retained_anchor_slots = candidate_slots[target_distances_for_contact[candidate_slots] <= anchor_release]
     update_ground_contact_anchors(
         model,
         data,
@@ -2412,15 +1981,7 @@ def solve_frame_body_segment_qp(
         robot_template,
         anchor_active,
         ground_contact_anchor_state,
-        retain_slot_ids=retained_anchor_slots,
     )
-    if retained_anchor_slots is not None and retained_anchor_slots.size:
-        held = np.asarray(
-            [slot_id for slot_id in retained_anchor_slots if int(slot_id) in ground_contact_anchor_state],
-            dtype=np.int32,
-        )
-        if held.size:
-            anchor_active = np.unique(np.concatenate([anchor_active, held])).astype(np.int32)
 
     selected_slot_ids = np.asarray(selected_slot_ids, dtype=np.int32).reshape(-1)
     source_slots = np.asarray(source_slots, dtype=np.float64)
@@ -2492,46 +2053,10 @@ def solve_frame_body_segment_qp(
         )
         anchor_row_costs = float(args.ground_contact_anchor_cost) * anchor_strength
 
-    # Slots in active object contact may have their surface rows relaxed: the real contact point
-    # sits (1 - smpl_scale) * height ABOVE where the shrunk body would put the hand, and the
-    # surface term is what holds the hand down there. 1.0 (the default) changes nothing.
-    surface_cost_scale = None
-    surface_relax = float(getattr(args, "object_contact_surface_relax", 1.0))
-    if (
-        surface_relax < 1.0
-        and object_contact_frame is not None
-        and object_contact_frame.get("activation") is not None
-    ):
-        relax_activation = np.asarray(object_contact_frame["activation"], dtype=np.float64).reshape(-1)
-        if str(getattr(args, "object_contact_surface_relax_scope", "slot")) == "segment":
-            part_ids = np.asarray(source_slot_part_ids, dtype=np.int32).reshape(-1)
-            beta = np.zeros_like(relax_activation)
-            if len(part_ids) == len(relax_activation):
-                for part_id in np.unique(part_ids):
-                    part_mask = part_ids == part_id
-                    beta[part_mask] = float(relax_activation[part_mask].max())
-            relax_activation = beta
-        surface_cost_scale = 1.0 - (1.0 - surface_relax) * relax_activation
-
     smooth_jac = None
     if len(joint_dof_addrs) > 0:
         smooth_jac = np.zeros((len(joint_dof_addrs), model.nv), dtype=np.float64)
         smooth_jac[np.arange(len(joint_dof_addrs)), joint_dof_addrs] = 1.0
-
-    # The floating base is excluded from smooth_cost/temporal_smooth_cost (which cover scalar
-    # joints only) and, with root_step_limit_mode off, has no per-frame bound either. These rows
-    # are the root's only in-solve regulariser; both costs default to 0, so nothing changes unless
-    # they are asked for.
-    root_smooth_cost = float(getattr(args, "root_smooth_cost", 0.0))
-    root_temporal_smooth_cost = float(getattr(args, "root_temporal_smooth_cost", 0.0))
-    root_jac = None
-    root_dof_ids = np.zeros(0, dtype=np.int32)
-    if root_smooth_cost > 0.0 or root_temporal_smooth_cost > 0.0:
-        root_translation_ids, root_rotation_ids = common.root_qvel_dof_groups(model)
-        root_dof_ids = np.concatenate([root_translation_ids, root_rotation_ids]).astype(np.int32)
-        if root_dof_ids.size:
-            root_jac = np.zeros((root_dof_ids.size, model.nv), dtype=np.float64)
-            root_jac[np.arange(root_dof_ids.size), root_dof_ids] = 1.0
 
     frame_iters = int(args.iters) if iters is None else int(iters)
     for _iter in range(max(1, frame_iters)):
@@ -2545,8 +2070,6 @@ def solve_frame_body_segment_qp(
         for local_row, slot_id in enumerate(selected_slot_ids):
             slot_id = int(slot_id)
             point_cost = float(point_costs[slot_id]) if slot_id < len(point_costs) else 0.0
-            if surface_cost_scale is not None and slot_id < len(surface_cost_scale):
-                point_cost *= float(surface_cost_scale[slot_id])
             if point_cost <= 0.0:
                 continue
             point = robot_points[local_row]
@@ -2573,8 +2096,6 @@ def solve_frame_body_segment_qp(
             for local_row, slot_id in enumerate(selected_slot_ids):
                 slot_id = int(slot_id)
                 normal_cost = float(normal_costs[slot_id]) if slot_id < len(normal_costs) else 0.0
-                if surface_cost_scale is not None and slot_id < len(surface_cost_scale):
-                    normal_cost *= float(surface_cost_scale[slot_id])
                 if normal_cost <= 0.0:
                     continue
                 robot_normal = robot_normals[local_row]
@@ -2655,12 +2176,7 @@ def solve_frame_body_segment_qp(
                     f"Object contact slot count mismatch: target={len(target_distances)}, "
                     f"robot={len(robot_template['geom_ids'])}"
                 )
-            contact_activation = object_contact_frame.get("activation")
-            if contact_activation is None:
-                active = np.where(target_distances <= object_contact_threshold)[0].astype(np.int32)
-            else:
-                contact_activation = np.asarray(contact_activation, dtype=np.float64).reshape(-1)
-                active = np.where(contact_activation > 0.0)[0].astype(np.int32)
+            active = np.where(target_distances <= object_contact_threshold)[0].astype(np.int32)
             if active.size > 0 and (len(object_points) > 0 or object_mode == "robot_slot_object"):
                 if object_contact_max_points > 0 and active.size > object_contact_max_points:
                     active = active[np.argsort(target_distances[active])[:object_contact_max_points]]
@@ -2675,15 +2191,12 @@ def solve_frame_body_segment_qp(
                         current_vectors = robot_points - slot_cache.points(paired_ids)
                     else:
                         current_vectors = robot_points - object_points[paired_ids]
-                    if contact_activation is None:
-                        strength = np.clip(
-                            (object_contact_threshold - target_distances[active])
-                            / max(object_contact_threshold, 1e-8),
-                            0.5,
-                            1.0,
-                        )
-                    else:
-                        strength = contact_activation[active]
+                    strength = np.clip(
+                        (object_contact_threshold - target_distances[active])
+                        / max(object_contact_threshold, 1e-8),
+                        0.5,
+                        1.0,
+                    )
                     row_costs = float(args.object_contact_map_cost) * strength
                     for row, slot_id in enumerate(active):
                         jac = slot_cache.point_jacobian(int(slot_id))
@@ -2692,25 +2205,22 @@ def solve_frame_body_segment_qp(
                         rows.append(row_costs[row] * jac)
                         residuals.append(row_costs[row] * (current_vectors[row] - target_vectors[int(slot_id)]))
 
+        if (
+            float(getattr(args, "interaction_mesh_cost", 0.0)) > 0.0
+            and object_contact_frame is not None
+            and object_contact_frame.get("interaction_mesh") is not None
+        ):
+            mesh_rows, mesh_residuals = hoi_scene.interaction_mesh_rows(
+                object_contact_frame["interaction_mesh"],
+                slot_cache,
+                float(args.interaction_mesh_cost),
+            )
+            rows.append(mesh_rows)
+            residuals.append(mesh_residuals)
+
         if qpos_prev is not None and float(args.smooth_cost) > 0.0 and smooth_jac is not None:
             rows.append(sqrt_smooth * smooth_jac)
             residuals.append(sqrt_smooth * (qpos[joint_qpos_addrs] - qpos_prev[joint_qpos_addrs]))
-
-        if root_jac is not None and qpos_prev is not None:
-            root_step = np.zeros(model.nv, dtype=np.float64)
-            mujoco.mj_differentiatePos(model, root_step, 1.0, qpos_prev, qpos)
-            if root_smooth_cost > 0.0:
-                sqrt_root_smooth = np.sqrt(root_smooth_cost)
-                rows.append(sqrt_root_smooth * root_jac)
-                residuals.append(sqrt_root_smooth * root_step[root_dof_ids])
-            if root_temporal_smooth_cost > 0.0 and qpos_prev2 is not None:
-                previous_root_step = np.zeros(model.nv, dtype=np.float64)
-                mujoco.mj_differentiatePos(model, previous_root_step, 1.0, qpos_prev2, qpos_prev)
-                sqrt_root_temporal = np.sqrt(root_temporal_smooth_cost)
-                rows.append(sqrt_root_temporal * root_jac)
-                residuals.append(
-                    sqrt_root_temporal * (root_step[root_dof_ids] - previous_root_step[root_dof_ids])
-                )
 
         if qpos_prev is not None and qpos_prev2 is not None and float(args.temporal_smooth_cost) > 0.0 and smooth_jac is not None:
             rows.append(sqrt_temporal_smooth * smooth_jac)
@@ -2752,13 +2262,15 @@ def solve_frame_body_segment_qp(
             and object_contact_frame is not None
             and robot_object_penetration_cache is not None
         ):
-            object_pose = np.concatenate(
-                [
-                    np.asarray(object_contact_frame["object_position"], dtype=np.float64).reshape(-1, 3),
-                    np.asarray(object_contact_frame["object_quat_wxyz"], dtype=np.float64).reshape(-1, 4),
-                ],
-                axis=1,
-            )
+            if object_contact_frame.get("object_poses") is not None:
+                object_pose = np.asarray(object_contact_frame["object_poses"], dtype=np.float64)
+            else:
+                object_pose = np.concatenate(
+                    [
+                        np.asarray(object_contact_frame["object_position"], dtype=np.float64).reshape(3),
+                        np.asarray(object_contact_frame["object_quat_wxyz"], dtype=np.float64).reshape(4),
+                    ]
+                )
             robot_object_margin = float(args.robot_object_margin)
             jacobians_object, distances_object = compute_robot_object_penetration_rows(
                 qpos,
@@ -2784,13 +2296,6 @@ def solve_frame_body_segment_qp(
             allow_off=True,
             label="root_step_limit_mode",
         )
-        if qpos_prev is None:
-            # The first frame is a pose FIT, not a step from anywhere, and it runs
-            # pose_init_iters times from a zero-joint pose. Bounding the root there can make the
-            # unslacked ground constraint infeasible; the limit only has meaning once there is a
-            # previous frame to step from, which is also when smooth_cost starts applying.
-            use_root_step_box = False
-            use_root_step_l2 = False
         local_dof_ids = common.local_pose_qvel_dof_ids(model)
         root_translation_dof_ids, root_rotation_dof_ids = common.root_qvel_dof_groups(model)
         step_lower, step_upper = common.qvel_step_bounds(
@@ -2908,6 +2413,15 @@ def solve_frame_body_segment_qp(
         ineq_A = np.asarray(ineq_rows, dtype=np.float64) if ineq_rows else None
         ineq_b = np.asarray(ineq_bounds, dtype=np.float64) if ineq_bounds else None
         ineq_soft_costs_array = np.asarray(ineq_soft_costs, dtype=np.float64) if ineq_rows else None
+        coupling_basis = None
+        if joint_couplings is not None:
+            # Solve over independent dofs only: dq = T dq_r keeps every coupled joint exact.
+            coupling_basis = joint_couplings.basis(qpos)
+            J = J @ coupling_basis
+            if ineq_A is not None:
+                ineq_A = ineq_A @ coupling_basis
+            step_lower, step_upper = joint_couplings.reduce_step_bounds(coupling_basis, step_lower, step_upper)
+            l2_step_limits = joint_couplings.reduce_l2_groups(coupling_basis, l2_step_limits)
         dq = common.solve_clarabel_qp_step(
             J,
             r,
@@ -2919,8 +2433,12 @@ def solve_frame_body_segment_qp(
             ineq_soft_costs=ineq_soft_costs_array,
             l2_step_limits=l2_step_limits,
         )
+        if coupling_basis is not None:
+            dq = coupling_basis @ dq
         mujoco.mj_integratePos(model, qpos, dq, 1.0)
         qpos = common.clamp_joint_ranges(model, qpos, joint_limits_by_qpos=joint_limits_by_qpos)
+        if joint_couplings is not None:
+            qpos = joint_couplings.project(qpos)
         costs.append(float(np.mean(r * r)))
     common.set_qpos(model, data, qpos)
     return qpos, costs[-1] if costs else 0.0
@@ -2973,6 +2491,7 @@ def main():
             smplx_batch_size=args.smplx_batch_size,
             smplx_batch_size_max=args.smplx_batch_size_max,
             smplx_batch_size_safety_factor=args.smplx_batch_size_safety_factor,
+            hand_pose_convention=args.source_hand_pose_convention,
         )
         vertices_world = common.source_points_to_retarget_frame(vertices_world, source_model_type, source_up)
         joints_world = common.source_points_to_retarget_frame(joints_world, source_model_type, source_up)
@@ -3010,80 +2529,6 @@ def main():
         f"[HumanoidRetarget] source slots={smpl_slot_name} center_mode={center_mode} "
         f"template_center={template_center.tolist()}"
     )
-
-    # retarget_object_size="real" keeps every object at its recorded size and pose and moves the
-    # HUMAN to meet them, by scaling it about the ground point it is touching rather than about
-    # the world origin. a_z is 0, so the floor is a fixed point and every ground term is unchanged.
-    retarget_object_size_mode = str(args.retarget_object_size).lower()
-    scene_objects = []
-    source_warp_shift = None
-    source_warp_anchor = None
-    if retarget_object_size_mode == "real_xy":
-        # Shrink the scene's floor plan by the same factor as the human and leave every height
-        # alone. Horizontal alignment is then exact for every object on every frame, with no warp
-        # of the human at all, so its trajectory stays the balanced one `scaled` produces.
-        scene_object_position_scale = np.asarray([smpl_scale, smpl_scale, 1.0], dtype=np.float64)
-    else:
-        scene_object_position_scale = np.ones(3, dtype=np.float64)
-    scene_object_position_offset = np.zeros(3, dtype=np.float64)
-    if retarget_object_size_mode in {"real", "real_xy"}:
-        scene_objects = load_scene_objects(args, frame_ids, ground_z, scene_object_position_scale)
-        if retarget_object_size_mode == "real_xy" and str(args.scene_scale_anchor) == "scene_centroid" and scene_objects:
-            # Scale the floor plan about the scene itself rather than the capture frame's origin.
-            # This is a rigid translation of the whole solved world -- human and objects move
-            # together -- so the retargeted motion is unchanged; what changes is how far each
-            # object ends up from where it was recorded, which is now set by its distance from the
-            # scene's own centre instead of from an arbitrary origin.
-            centroid = scene_centroid_xy(scene_objects)
-            scene_object_position_offset = np.asarray(
-                [(1.0 - smpl_scale) * centroid[0], (1.0 - smpl_scale) * centroid[1], 0.0], dtype=np.float64
-            )
-            place_scene_objects(scene_objects, scene_object_position_scale, scene_object_position_offset)
-            print(
-                f"[HumanoidRetarget][SceneAnchor] scene_centroid=({centroid[0]:.4f}, {centroid[1]:.4f}) "
-                f"offset=({scene_object_position_offset[0]:+.4f}, {scene_object_position_offset[1]:+.4f}) m "
-                f"applied to the objects AND to the human, so their relationship is unchanged"
-            )
-
-    def resolve_source_warp(human_points, source_joints):
-        """Per-frame world shift for the contact-anchored warp, or None to scale about the origin."""
-        nonlocal source_warp_shift, source_warp_anchor
-        if retarget_object_size_mode != "real":
-            if np.any(scene_object_position_offset):
-                # The scene was scaled about its own centre; the human is scaled about the world
-                # origin, so it needs the same constant translation or the two would disagree.
-                source_warp_shift = np.repeat(
-                    scene_object_position_offset[None, :].astype(np.float64), len(frame_ids), axis=0
-                )
-                source_warp_anchor = np.repeat(
-                    np.asarray([[scene_object_position_offset[0] / max(1.0 - smpl_scale, 1e-9),
-                                 scene_object_position_offset[1] / max(1.0 - smpl_scale, 1e-9), 0.0]]),
-                    len(frame_ids), axis=0,
-                )
-                return source_warp_shift
-            return None  # `real_xy` about the origin needs no warp at all
-        if not scene_objects:
-            print(
-                "[HumanoidRetarget][ContactAnchor][WARN] no scene objects with a prop trajectory; "
-                "falling back to scaling about the world origin."
-            )
-            return None
-        human_points = np.asarray(human_points)
-        stride = max(1, int(np.ceil(human_points.shape[1] / 1024.0)))
-        fallback_xy = np.asarray(
-            common.source_root_joint_position(source_joints[0], source_joint_names), dtype=np.float64
-        )[:2]
-        warp = compute_contact_anchor_warp(
-            human_points[:, ::stride, :],
-            scene_objects,
-            smpl_scale,
-            args,
-            fps,
-            fallback_xy,
-        )
-        source_warp_anchor = warp["anchor"]
-        source_warp_shift = warp["shift"]
-        return source_warp_shift
     if len(smpl_slots) != len(robot_slots):
         raise ValueError(f"SMPL slots={len(smpl_slots)} and robot slots={len(robot_slots)} differ.")
     uniform_original_slot_ids = None
@@ -3094,6 +2539,26 @@ def main():
     composite_racket_state = None
     if composite_racket_enabled and is_uniform_source:
         raise ValueError("Composite racket source currently requires an SMPL-X or SOMA body source")
+    scene_mode = hoi_scene.resolve_scene_mode(args.retarget_scene_mode)
+    if scene_mode == "true_scale" and composite_racket_enabled:
+        raise ValueError("retarget_scene_mode=true_scale does not support the composite racket source")
+    scene_anchors = None
+
+    def scale_source_points(points, joints):
+        # scaled: uniform scale about the world origin. true_scale: scale about
+        # a per-frame ground anchor so the scene can stay at its true size.
+        nonlocal scene_anchors
+        if scene_mode != "true_scale":
+            return points * smpl_scale, joints * smpl_scale
+        roots = np.stack(
+            [common.source_root_joint_position(frame_joints, source_joint_names) for frame_joints in joints],
+            axis=0,
+        )
+        scene_anchors = hoi_scene.scene_scale_anchors(roots, args.true_scale_anchor)
+        return (
+            hoi_scene.scale_about_anchors(points, scene_anchors, smpl_scale),
+            hoi_scene.scale_about_anchors(joints, scene_anchors, smpl_scale),
+        )
     if is_uniform_source:
         segment_sample_cfg = segment_sample_counts()
         body_segment_cfg = section(section(args.config_data, "solver"), "body_segment")
@@ -3140,13 +2605,7 @@ def main():
             args.source_ground_align,
             joint_names=source_joint_names,
         )
-        warp_shift = resolve_source_warp(source_slots, joints_world)
-        if warp_shift is None:
-            source_slots = source_slots * smpl_scale
-            joints_scaled = joints_world * smpl_scale
-        else:
-            source_slots = source_slots * smpl_scale + warp_shift[:, None, :]
-            joints_scaled = joints_world * smpl_scale + warp_shift[:, None, :]
+        source_slots, joints_scaled = scale_source_points(source_slots, joints_world)
         vertices_scaled = None
         source_slot_part_ids = np.zeros(len(smpl_slots), dtype=np.int32)
         source_tpose_slot_normals = np.asarray(source_binding["closest_normals"], dtype=np.float32)
@@ -3163,13 +2622,7 @@ def main():
             f"error_mean={binding_error_mean:.5f} error_p95={binding_error_p95:.5f}"
         )
     else:
-        warp_shift = resolve_source_warp(vertices_world, joints_world)
-        if warp_shift is None:
-            vertices_scaled = vertices_world * smpl_scale
-            joints_scaled = joints_world * smpl_scale
-        else:
-            vertices_scaled = vertices_world * smpl_scale + warp_shift[:, None, :]
-            joints_scaled = joints_world * smpl_scale + warp_shift[:, None, :]
+        vertices_scaled, joints_scaled = scale_source_points(vertices_world, joints_world)
         source_slots, source_slot_normals, source_slot_part_ids, source_tpose_slot_normals, source_binding = bind_source_slots_with_normals(
             smpl_slots,
             template_vertices_centered,
@@ -3183,6 +2636,14 @@ def main():
             source_joint_names=source_joint_names,
             source_template_joints=template_joints_centered,
         )
+        if args.hand_info is not None:
+            # Dedicated hand slots carry their exact part from the hand model.
+            source_slot_part_ids = np.asarray(source_slot_part_ids, dtype=np.int32).copy()
+            for (side, part), part_id in args.hand_part_ids.items():
+                mask = (args.hand_info["side"] == hand_correspondence.SIDE_INDEX[side]) & (
+                    args.hand_info["part"] == hand_correspondence.HAND_PARTS.index(part)
+                )
+                source_slot_part_ids[mask] = part_id
         if composite_racket_enabled:
             source_tpose_path = resolve_path(composite_racket_cfg.get("source_tpose_npz"), args.config_data)
             tpose_path = resolve_path(composite_racket_cfg.get("tpose_npz"), args.config_data)
@@ -3396,21 +2857,72 @@ def main():
     use_composite_racket_contact = object_contact_target == "composite_racket_slots"
     if use_composite_racket_contact and composite_racket_state is None:
         raise ValueError("composite_racket_slots object contact requires composite_racket source binding")
-    if use_composite_racket_contact and retarget_object_size_mode == "real":
-        raise ValueError(
-            "retarget_object_size='real' is not supported with "
-            "solver.body_segment.object_contact_target='composite_racket_slots': the racket "
-            "carries its own trajectory and is not a scene object the warp can anchor on."
-        )
     object_contact_source = None if use_composite_racket_contact else load_object_contact_source(
         args,
         frame_ids,
         source_slots,
         smpl_scale,
         ground_z,
-        scene_objects=scene_objects,
-        source_warp_shift=source_warp_shift,
+        scene_anchors=scene_anchors,
     )
+    scene_body_shift = None
+    if (
+        scene_mode == "true_scale"
+        and object_contact_source is not None
+        and str(args.true_scale_anchor) == "contact_shift"
+    ):
+        solver_cfg = section(args.config_data, "solver")
+        contact_targets = (
+            np.take_along_axis(
+                object_contact_source["retarget_points_world"],
+                object_contact_source["object_ids"][..., None].astype(np.int64),
+                axis=1,
+            )
+            + object_contact_source["pair_vectors"]
+        )
+        scene_body_shift, shift_contact_frames = hoi_scene.contact_alignment_shift(
+            source_slots,
+            contact_targets,
+            object_contact_source["distances"],
+            float(args.object_contact_map_threshold),
+            fps,
+            float(solver_cfg.get("true_scale_shift_smoothing", 0.25)),
+            float(solver_cfg.get("true_scale_max_shift", 0.5)),
+        )
+        source_slots = (source_slots + scene_body_shift[:, None, :]).astype(np.float32)
+        joints_scaled = (joints_scaled + scene_body_shift[:, None, :]).astype(np.float32)
+        if vertices_scaled is not None:
+            vertices_scaled = (vertices_scaled + scene_body_shift[:, None, :]).astype(np.float32)
+        shift_norms = np.linalg.norm(scene_body_shift[:, :2], axis=1)
+        print(
+            f"[HumanoidRetarget][Scene] contact_shift frames_with_contact={int(shift_contact_frames.sum())}/{len(frame_ids)} "
+            f"shift_xy mean={float(shift_norms.mean()):.4f} max={float(shift_norms.max()):.4f} "
+            f"smoothing={float(solver_cfg.get('true_scale_shift_smoothing', 0.25)):.3f}s"
+        )
+    interaction_mesh_frames = None
+    if (
+        scene_mode == "true_scale"
+        and object_contact_source is not None
+        and float(args.interaction_mesh_cost) > 0.0
+    ):
+        interaction_mesh_frames = hoi_scene.build_interaction_mesh_frames(
+            object_contact_source["source_slots_world"],
+            selected_slot_ids,
+            object_contact_source["retarget_points_world"],
+            smpl_scale,
+            float(args.interaction_mesh_radius),
+            int(args.interaction_mesh_max_object_points),
+            int(args.seed),
+            log_prefix="HumanoidRetarget",
+        )
+    if args.hand_info is not None:
+        target_mode = str(args.hand_retarget_cfg.get("target_mode", "part_proportional"))
+        if target_mode == "part_proportional":
+            # Contacts and the interaction mesh above were detected on the human hand;
+            # the surface targets now take the robot hand's proportions at the scaled wrist.
+            source_slots = hand_correspondence.hand_local_targets(source_slots, joints_scaled, smpl_scale, args.hand_info)
+        elif target_mode != "off":
+            raise ValueError(f"robot.hands.retarget.target_mode must be 'part_proportional' or 'off', got {target_mode!r}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     source_robot_xml = Path(args.robot_xml)
@@ -3427,6 +2939,13 @@ def main():
     )
     configured_limits = config_joint_limits(args.config_data)
     joint_limits_by_qpos, configured_limit_matches = common.build_scalar_joint_limits(model, configured_limits)
+    joint_couplings = JointCouplings.from_model(model, robot_config(args.config_data).get("joint_couplings", "off"))
+    if joint_couplings is not None:
+        joint_limits_by_qpos = joint_couplings.effective_joint_limits(joint_limits_by_qpos)
+        print(
+            f"[HumanoidRetarget][JointCouplings] {len(joint_couplings.couplings)} coupled joints solved in reduced "
+            f"coordinates: {model.nv} -> {len(joint_couplings.independent_dofs)} dofs"
+        )
     print(
         f"[HumanoidRetarget][JointLimit] configured={len(configured_limits)} "
         f"matched_same_name={len(configured_limit_matches)} scalar_joints={len(joint_limits_by_qpos)}"
@@ -3449,6 +2968,7 @@ def main():
         project_to_surface=bool(args.project_robot_slots),
         source_model_type=source_model_type,
         template_cfg=template_cfg,
+        slot_groups=hand_slot_bind_groups(model, args) if args.hand_info is not None else None,
     )
     if use_composite_racket_contact:
         candidate_racket_ids = np.asarray(composite_racket_state["racket_slot_ids"], dtype=np.int32)
@@ -3492,6 +3012,9 @@ def main():
             return
         apply_joint_qpos(_model, _data, robot_sample_qpos, required=False)
         apply_mimic_qpos(_model, _data, robot.get("mimic_qpos", {}) or {})
+        if joint_couplings is not None and _model.nq == model.nq:
+            _data.qpos[:] = joint_couplings.project(_data.qpos)
+            mujoco.mj_forward(_model, _data)
 
     surface_normal_cost_mode = str(args.surface_normal_cost_mode)
     tpose_surface_normal_offsets = np.zeros((0, 3), dtype=np.float32)
@@ -3568,6 +3091,8 @@ def main():
     q_body_zero = data_mj.qpos.copy()
     q_body_zero[joint_qpos_addrs] = 0.0
     q_body_zero = common.clamp_joint_ranges(model, q_body_zero, joint_limits_by_qpos=joint_limits_by_qpos)
+    if joint_couplings is not None:
+        q_body_zero = joint_couplings.project(q_body_zero)
     trajectory_warm_start_mode = str(args.trajectory_warm_start_mode).strip().lower()
     if trajectory_warm_start_mode not in {"sequential", "bidirectional"}:
         raise ValueError(
@@ -3584,6 +3109,55 @@ def main():
     progress_done = 0
     progress_total = len(frame_ids) * (2 if trajectory_warm_start_mode == "bidirectional" else 1)
 
+    def object_contact_frame_at(out_idx: int):
+        if object_contact_source is None:
+            return None
+        frame = {
+            "mode": object_contact_source.get("mode", "world_points"),
+            "distances": object_contact_source["distances"][out_idx],
+            "object_ids": object_contact_source["object_ids"][out_idx],
+            "pair_vectors": object_contact_source["pair_vectors"][out_idx],
+            "object_points": object_contact_source["retarget_points_world"][out_idx],
+            "object_position": object_contact_source["motion_positions"][out_idx],
+            "object_quat_wxyz": object_contact_source["motion_quats_wxyz"][out_idx],
+        }
+        if object_contact_source.get("object_poses") is not None:
+            frame["object_poses"] = object_contact_source["object_poses"][out_idx]
+        if interaction_mesh_frames is not None:
+            frame["interaction_mesh"] = interaction_mesh_frames[out_idx]
+        return frame
+
+    def solve_frame(out_idx: int, q_init, q_prev, q_prev2, ground_contact_anchor_state, iters: int):
+        return solve_frame_body_segment_qp(
+            model,
+            data_mj,
+            q_init,
+            q_prev,
+            q_prev2,
+            source_slots[out_idx],
+            source_slot_normals[out_idx],
+            None if surface_normal_targets is None else surface_normal_targets[out_idx],
+            selected_slot_ids,
+            source_slot_part_ids,
+            point_slot_costs,
+            normal_slot_costs,
+            None if source_self_contact_maps is None else source_self_contact_maps[out_idx],
+            None if source_ground_contact_distances is None else source_ground_contact_distances[out_idx],
+            None if source_ground_contact_weight_distances is None else source_ground_contact_weight_distances[out_idx],
+            object_contact_frame_at(out_idx),
+            robot_template,
+            joint_qpos_addrs,
+            joint_dof_addrs,
+            args,
+            iters=iters,
+            joint_limits_by_qpos=joint_limits_by_qpos,
+            robot_self_penetration_cache=robot_self_penetration_cache,
+            ground_penetration_collision_cache=ground_penetration_collision_cache,
+            robot_object_penetration_cache=robot_object_penetration_cache,
+            ground_contact_anchor_state=ground_contact_anchor_state,
+            joint_couplings=joint_couplings,
+        )
+
     def solve_sequence(order, desc: str):
         nonlocal progress_done
         q_seq = np.empty((len(frame_ids), model.nq), dtype=np.float32)
@@ -3593,49 +3167,13 @@ def main():
         ground_contact_anchor_state = {}
         for out_idx in tqdm(order, desc=desc):
             q_init = initial_qpos_for_frame(out_idx) if q_prev is None else q_prev.copy()
-            object_contact_frame = None
-            if object_contact_source is not None:
-                object_contact_frame = {
-                    "mode": object_contact_source.get("mode", "world_points"),
-                    "distances": object_contact_source["distances"][out_idx],
-                    "object_ids": object_contact_source["object_ids"][out_idx],
-                    "pair_vectors": object_contact_source["pair_vectors"][out_idx],
-                    "object_points": object_contact_source["retarget_points_world"][out_idx],
-                    "object_position": object_contact_source["motion_positions"][out_idx],
-                    "object_quat_wxyz": object_contact_source["motion_quats_wxyz"][out_idx],
-                    "activation": (
-                        None
-                        if object_contact_source.get("activation") is None
-                        else object_contact_source["activation"][out_idx]
-                    ),
-                }
-            q_opt, cost = solve_frame_body_segment_qp(
-                model,
-                data_mj,
+            q_opt, cost = solve_frame(
+                out_idx,
                 q_init,
                 q_prev,
                 q_prev2,
-                source_slots[out_idx],
-                source_slot_normals[out_idx],
-                None if surface_normal_targets is None else surface_normal_targets[out_idx],
-                selected_slot_ids,
-                source_slot_part_ids,
-                point_slot_costs,
-                normal_slot_costs,
-                None if source_self_contact_maps is None else source_self_contact_maps[out_idx],
-                None if source_ground_contact_distances is None else source_ground_contact_distances[out_idx],
-                None if source_ground_contact_weight_distances is None else source_ground_contact_weight_distances[out_idx],
-                object_contact_frame,
-                robot_template,
-                joint_qpos_addrs,
-                joint_dof_addrs,
-                args,
-                iters=int(args.pose_init_iters) if q_prev is None and int(args.pose_init_iters) > 0 else int(args.iters),
-                joint_limits_by_qpos=joint_limits_by_qpos,
-                robot_self_penetration_cache=robot_self_penetration_cache,
-                ground_penetration_collision_cache=ground_penetration_collision_cache,
-                robot_object_penetration_cache=robot_object_penetration_cache,
-                ground_contact_anchor_state=ground_contact_anchor_state,
+                ground_contact_anchor_state,
+                int(args.pose_init_iters) if q_prev is None and int(args.pose_init_iters) > 0 else int(args.iters),
             )
             q_seq[out_idx] = q_opt.astype(np.float32)
             seq_costs[out_idx] = float(cost)
@@ -3731,8 +3269,9 @@ def main():
             include_root_translation=bool(args.trajectory_filter_root_translation),
             anchor_start_frames=int(args.trajectory_filter_anchor_start_frames),
             anchor_end_frames=int(args.trajectory_filter_anchor_end_frames),
-            include_root_rotation=bool(getattr(args, "trajectory_filter_root_rotation", False)),
         ).astype(np.float32)
+        if joint_couplings is not None:
+            qpos_seq = np.stack([joint_couplings.project(q) for q in qpos_seq]).astype(np.float32)
         filtered_summary = common.qpos_temporal_summary(qpos_seq, joint_qpos_addrs)
         print(
             "[HumanoidRetarget][TrajectoryFilter] mode=lqr "
@@ -3745,54 +3284,54 @@ def main():
             f"anchor_end={int(args.trajectory_filter_anchor_end_frames)} "
             f"step_p95 {raw_summary['step_p95']:.6g}->{filtered_summary['step_p95']:.6g} "
             f"accel_p95 {raw_summary['accel_p95']:.6g}->{filtered_summary['accel_p95']:.6g} "
-            f"jerk_p95 {raw_summary['jerk_p95']:.6g}->{filtered_summary['jerk_p95']:.6g} "
-            f"root_rotation={bool(getattr(args, 'trajectory_filter_root_rotation', False))}"
+            f"jerk_p95 {raw_summary['jerk_p95']:.6g}->{filtered_summary['jerk_p95']:.6g}"
         )
 
-    if bool(getattr(args, "trajectory_filter_reproject", False)):
-        qpos_seq, reprojection = reproject_qpos_to_constraints(
-            model,
-            data_mj,
-            qpos_seq,
-            robot_template,
-            args,
-            object_contact_source,
-            robot_object_penetration_cache,
-            joint_limits_by_qpos=joint_limits_by_qpos,
-            robot_self_penetration_cache=robot_self_penetration_cache,
-        )
-        qpos_seq = np.asarray(qpos_seq, dtype=np.float32)
+    refine_iters = int(args.post_filter_refine_iters)
+    contact_metrics_before_refine = None
+    if scene_mode == "true_scale" and refine_iters > 0 and unfiltered_qpos_seq.size > 0:
+        # The LQR filter ignores contacts and collisions; re-linearise every
+        # frame around the filtered pose so they are enforced on the output.
+        if object_contact_source is not None:
+            contact_metrics_before_refine = evaluate_object_contacts(
+                model, data_mj, robot_template, qpos_seq, object_contact_source, robot_object_penetration_cache
+            )
+        refined_qpos_seq = np.empty_like(qpos_seq)
+        q_prev2 = None
+        q_prev = None
+        refine_anchor_state = {}
+        for out_idx in tqdm(range(len(frame_ids)), desc="[HumanoidRetarget] post-filter refine"):
+            q_opt, _cost = solve_frame(
+                out_idx,
+                np.asarray(qpos_seq[out_idx], dtype=np.float64),
+                q_prev,
+                q_prev2,
+                refine_anchor_state,
+                refine_iters,
+            )
+            refined_qpos_seq[out_idx] = q_opt.astype(np.float32)
+            q_prev2 = q_prev
+            q_prev = q_opt
+        refined_summary = common.qpos_temporal_summary(refined_qpos_seq, joint_qpos_addrs)
         print(
-            "[HumanoidRetarget][TrajectoryFilter][Reproject] "
-            f"iters={int(args.trajectory_filter_reproject_iters)} "
-            f"tolerance={float(args.trajectory_filter_reproject_tolerance):.2e} "
-            f"frames_adjusted={reprojection['frames']}/{len(qpos_seq)} "
-            f"max_step={reprojection['max_step']:.6f} "
-            f"max_violation {reprojection['max_violation_before']:.6f}->"
-            f"{reprojection['max_violation_after']:.6f} m"
+            f"[HumanoidRetarget][PostFilterRefine] iters={refine_iters} "
+            f"step_p95 {filtered_summary['step_p95']:.6g}->{refined_summary['step_p95']:.6g} "
+            f"accel_p95 {filtered_summary['accel_p95']:.6g}->{refined_summary['accel_p95']:.6g} "
+            f"jerk_p95 {filtered_summary['jerk_p95']:.6g}->{refined_summary['jerk_p95']:.6g}"
         )
+        qpos_seq = refined_qpos_seq
 
-    if retarget_object_size_mode in {"real", "real_xy"}:
-        object_mesh_scale = 1.0
-        object_position_scale = scene_object_position_scale
-    elif retarget_object_size_mode == "original":
-        object_mesh_scale, object_position_scale = 1.0, np.full(3, float(smpl_scale))
-    else:
-        object_mesh_scale, object_position_scale = float(smpl_scale), np.full(3, float(smpl_scale))
-    object_names = [str(scene_object["name"]) for scene_object in scene_objects]
-    if not object_names and object_contact_source is not None:
-        object_names = [str(object_contact_source.get("name", ""))]
-    zero_warp = np.zeros((len(frame_ids), 3), dtype=np.float32)
+    contact_metrics = None
+    if object_contact_source is not None and object_contact_source.get("mode", "world_points") == "world_points":
+        contact_metrics = evaluate_object_contacts(
+            model, data_mj, robot_template, qpos_seq, object_contact_source, robot_object_penetration_cache
+        )
+        if contact_metrics_before_refine is not None:
+            print(f"[HumanoidRetarget][SceneMetrics] before_refine {contact_metrics_before_refine['summary']}")
+        print(f"[HumanoidRetarget][SceneMetrics] scene_mode={scene_mode} {contact_metrics['summary']}")
 
     output_payload = {
         "qpos": qpos_seq,
-        "retarget_object_size": np.asarray(retarget_object_size_mode),
-        "object_mesh_scale": np.asarray([object_mesh_scale], dtype=np.float32),
-        "object_position_scale": np.asarray(object_position_scale, dtype=np.float32).reshape(3),
-        "object_position_offset": np.asarray(scene_object_position_offset, dtype=np.float32).reshape(3),
-        "source_warp_offset": zero_warp if source_warp_shift is None else np.asarray(source_warp_shift, dtype=np.float32),
-        "source_warp_anchor": zero_warp if source_warp_anchor is None else np.asarray(source_warp_anchor, dtype=np.float32),
-        "object_names": np.asarray(object_names, dtype=object),
         "fps": np.asarray([fps], dtype=np.float32),
         "frame_ids": frame_ids.astype(np.int32),
         "robot_xml": np.asarray(str(robot_xml)),
@@ -3805,6 +3344,37 @@ def main():
         "ground_z": np.asarray([ground_z], dtype=np.float32),
         "zero_source_finger_pose": np.asarray([bool(args.zero_source_finger_pose)]),
     }
+    if args.hand_info is not None:
+        tips = hand_correspondence.fingertip_metrics(model, qpos_seq, joints_scaled, smpl_scale, args.hand_info)
+        output_payload["hand_fingertip_names"] = np.asarray(tips["names"])
+        output_payload["hand_fingertip_targets"] = tips["targets"]
+        output_payload["hand_fingertip_error_world"] = tips["world"]
+        output_payload["hand_fingertip_error_local"] = tips["local"]
+        for label, err in (("world", tips["world"]), ("hand-local", tips["local"])):
+            per_finger = ", ".join(f"{name}={100 * float(err[:, i].mean()):.1f}" for i, name in enumerate(tips["names"]))
+            print(
+                f"[HumanoidRetarget][HandMetrics] fingertip error {label} mean={100 * float(err.mean()):.2f} cm "
+                f"p95={100 * float(np.percentile(err, 95)):.2f} cm; {per_finger}"
+            )
+    if joint_couplings is not None:
+        coupling_residual = joint_couplings.residual(qpos_seq)
+        output_payload["joint_coupling_names"] = np.asarray(joint_couplings.names)
+        output_payload["joint_coupling_residual"] = coupling_residual.astype(np.float32)
+        print(f"[HumanoidRetarget][JointCouplings] max residual over the saved motion {float(coupling_residual.max()):.2e}")
+    if scene_mode == "true_scale":
+        output_payload["retarget_scene_mode"] = np.asarray(scene_mode)
+        if object_contact_source is not None and object_contact_source.get("objects"):
+            scene_objects = object_contact_source["objects"]
+            output_payload["object_names"] = np.asarray([obj["name"] for obj in scene_objects])
+            output_payload["object_source_paths"] = np.asarray([str(obj["path"]) for obj in scene_objects])
+            output_payload["object_positions"] = np.stack([obj["positions"] for obj in scene_objects]).astype(np.float32)
+            output_payload["object_quats_wxyz"] = np.stack([obj["quats_wxyz"] for obj in scene_objects]).astype(np.float32)
+        if scene_body_shift is not None:
+            output_payload["scene_body_shift"] = scene_body_shift.astype(np.float32)
+        if contact_metrics is not None:
+            output_payload["object_contact_error"] = contact_metrics["contact_error"]
+            output_payload["object_contact_count"] = contact_metrics["contact_count"]
+            output_payload["robot_object_min_distance"] = contact_metrics["min_distance"]
     np.savez_compressed(args.out, **output_payload)
     print(
         f"[HumanoidRetarget] saved {args.out} qpos={qpos_seq.shape} "

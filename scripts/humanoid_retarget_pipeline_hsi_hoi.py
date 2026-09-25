@@ -9,8 +9,10 @@ import hashlib
 import json
 import re
 import subprocess
+import shutil
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from humanoid_retarget_pipeline import (  # noqa: E402
     build_correspondence_dataset,
     correspondence_slots_compatible,
     dataset_out,
+    ensure_retarget_slots,
     retarget_motion,
     retarget_out,
     retarget_result_has_final_qpos_only,
@@ -43,8 +46,13 @@ from humanoid_retarget_pipeline import (  # noqa: E402
 
 DEFAULTS_CONFIG = ROOT / "humanoid_retarget_defaults_hsi_hoi_standard.json"
 DEFAULT_ROBOT_CONFIG = ROOT / "robot_configs" / "humanoid_retarget_unitree_g1_example.json"
-GRAIL_OBJECT_ASSET_VERSION = "3"
+GRAIL_OBJECT_ASSET_VERSION = "4"
 GRAIL_CONVEX_MJCF_VERSION = 3
+GRAIL_SIZE_DESCRIPTOR_TOLERANCE = 0.02
+GRAIL_TABLE_STEM = "grail_table"
+OBJECT_COLLISION_VERSION = 1
+OBJECT_COLLISION_SCENE_ROOT = ROOT / "output" / "hsi_hoi_objects"
+OBJECT_COLLISION_CACHE_ROOT = ROOT / "output" / "object_collision_cache"
 
 
 def parse_args():
@@ -64,6 +72,12 @@ def parse_args():
     parser.add_argument("--end", type=int, default=None)
     parser.add_argument("--stride", type=int, default=None)
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--scene-mode",
+        choices=("scaled", "true_scale"),
+        default=None,
+        help="Override solver.retarget_scene_mode: scale the whole scene to the robot, or keep objects at true size.",
+    )
     parser.add_argument("--force-build", action="store_true")
     parser.add_argument("--force-train", action="store_true")
     parser.add_argument("--force-retarget", action="store_true")
@@ -356,6 +370,193 @@ def discover_samp_objects(seq_dir: Path) -> list[dict[str, str]]:
     return objects
 
 
+def _mjcf_mesh_base(root: ET.Element, xml_path: Path) -> Path:
+    compiler = root.find("compiler")
+    meshdir = compiler.get("meshdir") if compiler is not None else None
+    base = Path(xml_path).resolve().parent
+    if meshdir:
+        base = Path(meshdir) if Path(meshdir).is_absolute() else (base / meshdir).resolve()
+    return base
+
+
+def _mjcf_collision_mesh_geoms(root: ET.Element) -> list[ET.Element]:
+    """Mesh geoms MuJoCo collides with (compiled defaults: contype = conaffinity = 1)."""
+    geoms = []
+    for geom in root.iter("geom"):
+        if geom.get("type") != "mesh" or not geom.get("mesh"):
+            continue
+        collides = int(geom.get("contype", "1")) != 0 or int(geom.get("conaffinity", "1")) != 0
+        if collides or geom.get("group") == "3":
+            geoms.append(geom)
+    return geoms
+
+
+def _load_scaled_mesh(mesh_el: ET.Element, mesh_base: Path) -> tuple[Path, trimesh.Trimesh]:
+    mesh_path = Path(mesh_el.get("file"))
+    mesh_path = mesh_path if mesh_path.is_absolute() else (mesh_base / mesh_path).resolve()
+    mesh = trimesh.load(mesh_path, force="mesh", process=True)
+    scale = np.fromstring(mesh_el.get("scale", "1 1 1"), sep=" ", dtype=np.float64)
+    if scale.size == 3 and not np.allclose(scale, 1.0):
+        mesh.apply_scale(scale)
+    return mesh_path, mesh
+
+
+def _concave_ratio(mesh: trimesh.Trimesh) -> float:
+    """Convex-hull volume over mesh volume; inf when the mesh has no reliable volume."""
+    if not mesh.is_watertight or mesh.volume <= 1e-12:
+        return float("inf")
+    return float(mesh.convex_hull.volume / mesh.volume)
+
+
+def _object_collision_sources(seq_dir: Path, objects: list[dict[str, str]]) -> dict[str, int]:
+    sources = {}
+    for obj in objects:
+        for key in ("xml", "obj", "prop"):
+            if obj[key]:
+                sources[obj[key]] = Path(obj[key]).stat().st_mtime_ns
+        if obj["xml"]:
+            root = ET.parse(obj["xml"]).getroot()
+            base = _mjcf_mesh_base(root, Path(obj["xml"]))
+            for mesh_el in root.iter("mesh"):
+                if mesh_el.get("file"):
+                    path = Path(mesh_el.get("file"))
+                    path = path if path.is_absolute() else (base / path).resolve()
+                    if path.exists():
+                        sources[str(path)] = path.stat().st_mtime_ns
+    return sources
+
+
+def prepare_standard_object_collision(
+    seq_key: str,
+    seq_dir: Path,
+    config: dict[str, Any],
+    force: bool,
+    dry_run: bool,
+) -> Path:
+    """Object dir whose concave collision meshes are split into convex pieces.
+
+    MuJoCo collides a mesh geom as its convex hull, which fills cavities (a
+    microwave, a bowl, the space under a table) the hand has to enter. Any
+    collision mesh noticeably larger as a hull than as itself is decomposed with
+    CoACD into cached pieces, and the scene is rewritten under
+    ``output/hsi_hoi_objects/<seq>``; the source folder is never modified. With
+    nothing to decompose the sequence dir is returned unchanged.
+    """
+    object_cfg = section(hsi_config(config), "object")
+    if not bool(object_cfg.get("auto_convex_decomposition", True)):
+        return seq_dir
+    objects = discover_samp_objects(seq_dir)
+    if not objects:
+        return seq_dir
+    from object_collision import CoacdArgs, build_collision_cache, geometry_digest  # noqa: WPS433
+
+    coacd_args = CoacdArgs(
+        threshold=float(object_cfg.get("coacd_threshold", 0.03)),
+        max_convex_hull=int(object_cfg.get("coacd_max_convex_hull", 32)),
+        mcts_iterations=int(object_cfg.get("coacd_mcts_iterations", 200)),
+        resolution=int(object_cfg.get("coacd_resolution", 2000)),
+    )
+    tolerance = float(object_cfg.get("coacd_concavity_tolerance", 0.05))
+    out_dir = OBJECT_COLLISION_SCENE_ROOT / safe_name(seq_key)
+    sources = _object_collision_sources(seq_dir, objects)
+    settings = {"version": OBJECT_COLLISION_VERSION, "coacd": vars(coacd_args), "tolerance": tolerance}
+    metadata_path = out_dir / "metadata.json"
+    if metadata_path.exists() and not force:
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("settings") == settings and metadata.get("sources") == sources:
+                return out_dir if metadata.get("decomposed") else seq_dir
+        except Exception:
+            pass
+
+    plans = []
+    for obj in objects:
+        if not obj["xml"]:
+            plans.append((obj, None, []))
+            continue
+        root = ET.parse(obj["xml"]).getroot()
+        base = _mjcf_mesh_base(root, Path(obj["xml"]))
+        meshes = {mesh_el.get("name"): mesh_el for mesh_el in root.iter("mesh")}
+        flagged = []
+        for geom in _mjcf_collision_mesh_geoms(root):
+            mesh_el = meshes.get(geom.get("mesh"))
+            if mesh_el is None or not mesh_el.get("file"):
+                continue
+            mesh_path, mesh = _load_scaled_mesh(mesh_el, base)
+            ratio = _concave_ratio(mesh)
+            if ratio > 1.0 + tolerance:
+                flagged.append((geom, mesh_path, mesh, ratio))
+        plans.append((obj, root, flagged))
+    decomposed = any(flagged for _obj, _root, flagged in plans)
+    if dry_run:
+        print(f"[HSIHOI][Collision] would {'decompose into ' + str(out_dir) if decomposed else 'keep'} {seq_dir}")
+        return out_dir if decomposed else seq_dir
+    if decomposed:
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    report = {}
+    for obj, root, flagged in plans:
+        stem = obj["name"]
+        if root is None:
+            if decomposed:
+                shutil.copy2(obj["obj"], out_dir / Path(obj["obj"]).name)
+                shutil.copy2(obj["prop"], out_dir / Path(obj["prop"]).name)
+            continue
+        if not decomposed:
+            continue
+        base = _mjcf_mesh_base(root, Path(obj["xml"]))
+        for mesh_el in root.iter("mesh"):
+            if mesh_el.get("file") and not Path(mesh_el.get("file")).is_absolute():
+                mesh_el.set("file", str((base / mesh_el.get("file")).resolve()))
+        compiler = root.find("compiler")
+        if compiler is not None and "meshdir" in compiler.attrib:
+            del compiler.attrib["meshdir"]
+        asset = root.find("asset")
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for geom, mesh_path, mesh, ratio in flagged:
+            digest = geometry_digest(mesh)
+            input_obj = OBJECT_COLLISION_CACHE_ROOT / "_inputs" / f"{digest}.obj"
+            input_obj.parent.mkdir(parents=True, exist_ok=True)
+            if not input_obj.exists():
+                mesh.export(input_obj)
+            reason = "not watertight" if np.isinf(ratio) else f"hull/mesh volume={ratio:.2f}"
+            print(f"[HSIHOI][Collision] {stem}: {geom.get('name')} {reason}; convex pieces for {mesh_path.name}")
+            parts, method = build_collision_cache(input_obj, OBJECT_COLLISION_CACHE_ROOT / digest, coacd_args)
+            parent = parents[geom]
+            index = list(parent).index(geom)
+            parent.remove(geom)
+            geom_name = geom.get("name") or f"{stem}_collision"
+            for part_index, part in enumerate(parts):
+                piece_mesh = f"{geom_name}_piece_{part_index}"
+                ET.SubElement(asset, "mesh", {"name": piece_mesh, "file": str(part)})
+                attrs = {key: value for key, value in geom.attrib.items() if key not in {"name", "mesh"}}
+                attrs.update({"name": piece_mesh, "mesh": piece_mesh})
+                parent.insert(index + part_index, ET.Element("geom", attrs))
+            report[f"{stem}/{geom_name}"] = {
+                "hull_over_mesh": None if np.isinf(ratio) else round(ratio, 3),
+                "pieces": len(parts),
+                "method": method,
+            }
+        used = {geom.get("mesh") for geom in root.iter("geom")}
+        for mesh_el in list(asset):
+            if mesh_el.tag == "mesh" and mesh_el.get("name") not in used:
+                asset.remove(mesh_el)
+        (out_dir / f"{stem}.xml").write_text(ET.tostring(root, encoding="unicode") + "\n", encoding="utf-8")
+        shutil.copy2(obj["prop"], out_dir / Path(obj["prop"]).name)
+    if not decomposed:
+        OBJECT_COLLISION_SCENE_ROOT.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps({"settings": settings, "sources": sources, "decomposed": decomposed, "report": report}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if decomposed:
+        print(f"[HSIHOI][Collision] scene with convex collision pieces: {out_dir}")
+        return out_dir
+    return seq_dir
+
+
 def grail_root_for_sequence(sequence_path: Path) -> Path:
     if not is_grail_sequence(sequence_path):
         raise ValueError(f"Not a GRAIL sequence: {sequence_path}")
@@ -478,6 +679,100 @@ def export_grail_usd_obj(
     repair_obj_face_winding(obj_path)
 
 
+def grail_usd_extent(usd_path: Path) -> np.ndarray:
+    from pxr import Usd, UsdGeom  # noqa: WPS433
+
+    stage = Usd.Stage.Open(str(usd_path))
+    if stage is None:
+        raise ValueError(f"Could not open GRAIL USD: {usd_path}")
+    xform_cache = UsdGeom.XformCache()
+    lower = np.full(3, np.inf)
+    upper = np.full(3, -np.inf)
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        points = np.asarray(UsdGeom.Mesh(prim).GetPointsAttr().Get(), dtype=np.float64).reshape(-1, 3)
+        matrix = np.asarray(xform_cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+        points = (np.concatenate([points, np.ones((len(points), 1))], axis=1) @ matrix.T)[:, :3]
+        lower = np.minimum(lower, points.min(axis=0))
+        upper = np.maximum(upper, points.max(axis=0))
+    return upper - lower
+
+
+def resolve_grail_object_scale(usd_path: Path, obj_data: dict[str, Any]) -> tuple[np.ndarray, bool]:
+    """Mesh scale to apply to a GRAIL USD and whether ``obj_scale`` was applied.
+
+    Pickup objects ship metric USD meshes whose ``obj_scale`` equals their
+    largest extent (a size descriptor, not a scale): applying it again shrinks
+    them several times and leaves them floating above their support. Scene
+    objects such as chairs store a true scale factor. Treat ``obj_scale`` as a
+    size descriptor when it matches the USD's largest extent.
+    """
+    object_scale = np.asarray(obj_data.get("obj_scale", np.ones(3)), dtype=np.float64).reshape(-1)
+    if object_scale.size == 1:
+        object_scale = np.repeat(object_scale, 3)
+    object_scale = object_scale[:3]
+    if np.allclose(object_scale, 1.0) or not np.allclose(object_scale, object_scale[0]):
+        return object_scale, True
+    max_extent = float(grail_usd_extent(usd_path).max())
+    if abs(max_extent - float(object_scale[0])) <= GRAIL_SIZE_DESCRIPTOR_TOLERANCE * float(object_scale[0]):
+        print(
+            f"[HSIHOI][GRAIL] obj_scale={float(object_scale[0]):.4f} equals the metric USD extent "
+            f"{max_extent:.4f}; keeping the USD at its original size: {usd_path.name}"
+        )
+        return np.ones(3, dtype=np.float64), False
+    return object_scale, True
+
+
+def grail_table_box(payload: dict[str, Any]) -> dict[str, np.ndarray] | None:
+    scene_data = payload.get("scene_data")
+    if not isinstance(scene_data, dict) or not isinstance(scene_data.get("table"), dict):
+        return None
+    table = scene_data["table"]
+    return {
+        "pos": np.asarray(table["pos"], dtype=np.float64).reshape(3),
+        "size": np.asarray(table["size"], dtype=np.float64).reshape(3),
+    }
+
+
+def write_grail_table_object(out_dir: Path, table: dict[str, np.ndarray], frame_count: int) -> None:
+    """Export the static GRAIL table box as a second scene object.
+
+    ``scene_data.table.size`` holds full extents; the sequence object rests on
+    ``pos.z + size.z / 2``. The box is written as a mesh so it is sampled for
+    contacts and collision-checked like any other object.
+    """
+    mesh = trimesh.creation.box(extents=table["size"])
+    mesh.export(out_dir / f"{GRAIL_TABLE_STEM}.obj")
+    (out_dir / f"{GRAIL_TABLE_STEM}.xml").write_text(
+        f"<mujoco model=\"{GRAIL_TABLE_STEM}\">\n"
+        f"  <asset><mesh name=\"{GRAIL_TABLE_STEM}_mesh\" file=\"{GRAIL_TABLE_STEM}.obj\"/></asset>\n"
+        f"  <worldbody><body name=\"{GRAIL_TABLE_STEM}\"><freejoint name=\"{GRAIL_TABLE_STEM}_freejoint\"/>"
+        f"<geom name=\"{GRAIL_TABLE_STEM}_visual\" type=\"mesh\" mesh=\"{GRAIL_TABLE_STEM}_mesh\" "
+        "group=\"2\" contype=\"0\" conaffinity=\"0\" rgba=\"0.72 0.6 0.45 1\"/>"
+        f"<geom name=\"{GRAIL_TABLE_STEM}_collision\" type=\"mesh\" mesh=\"{GRAIL_TABLE_STEM}_mesh\" "
+        "group=\"3\" contype=\"1\" conaffinity=\"1\" rgba=\"0.25 0.45 0.8 0.15\"/>"
+        "</body></worldbody>\n</mujoco>\n",
+        encoding="utf-8",
+    )
+    with (out_dir / f"prop_{GRAIL_TABLE_STEM}.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["px", "py", "pz", "qx", "qy", "qz", "qw"])
+        row = [*table["pos"].tolist(), 0.0, 0.0, 0.0, 1.0]
+        for _ in range(int(frame_count)):
+            writer.writerow(row)
+
+
+def grail_asset_scale_current(sequence_path: Path, usd_path: Path, metadata: dict[str, Any], asset_dir: Path) -> bool:
+    """Whether cached GRAIL assets match the current scale rule and scene export."""
+    payload = load_grail_pickle(sequence_path)
+    if grail_table_box(payload) is not None and not (asset_dir / f"prop_{GRAIL_TABLE_STEM}.csv").exists():
+        return False
+    _scale, applied = resolve_grail_object_scale(usd_path, payload.get("obj_data", {}))
+    # Assets written before the rule existed always applied obj_scale.
+    return bool(metadata.get("object_scale_applied", True)) == bool(applied)
+
+
 def prepare_grail_object_assets(
     seq_key: str,
     sequence_path: Path,
@@ -521,6 +816,12 @@ def prepare_grail_object_assets(
                     int(metadata.get("asset_version", 0)) == GRAIL_CONVEX_MJCF_VERSION
                     and collision_count > 0
                     and all(path.exists() for path in collision_paths)
+                    and grail_asset_scale_current(
+                        sequence_path,
+                        root / "object_usd" / f"{sequence_path.stem}.usd",
+                        metadata,
+                        offline_dir,
+                    )
                 )
             except Exception:
                 return False
@@ -533,7 +834,15 @@ def prepare_grail_object_assets(
         if bool(object_cfg.get("grail_auto_prepare_mjcf", True)):
             prepare_script = ROOT / "scripts/prepare_grail_object_mjcf.py"
             prepare_python_value = object_cfg.get("grail_mjcf_python")
-            prepare_python = Path(prepare_python_value).expanduser() if prepare_python_value else Path(sys.executable)
+            if prepare_python_value:
+                prepare_python = Path(prepare_python_value).expanduser()
+                if not prepare_python.is_file():
+                    # Bare command names such as "python" resolve through PATH.
+                    resolved = shutil.which(str(prepare_python_value))
+                    if resolved:
+                        prepare_python = Path(resolved)
+            else:
+                prepare_python = Path(sys.executable)
             if not prepare_python.is_file():
                 raise FileNotFoundError(f"GRAIL MJCF preparation Python not found: {prepare_python}")
             command = [
@@ -587,10 +896,7 @@ def prepare_grail_object_assets(
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = load_grail_pickle(sequence_path)
     obj_data = payload.get("obj_data", {})
-    object_scale = np.asarray(obj_data.get("obj_scale", np.ones(3)), dtype=np.float64).reshape(-1)
-    if object_scale.size == 1:
-        object_scale = np.repeat(object_scale, 3)
-    object_scale = object_scale[:3]
+    object_scale, _applied = resolve_grail_object_scale(usd_path, obj_data)
     export_grail_usd_obj(usd_path, obj_path, texture_path, object_scale)
     xml_path.write_text(
         "<mujoco model=\"grail_object\">\n"
@@ -608,6 +914,9 @@ def prepare_grail_object_assets(
         writer.writerow(["px", "py", "pz", "qx", "qy", "qz", "qw"])
         for pos, quat in zip(positions, quats):
             writer.writerow([*pos.tolist(), *quat.tolist()])
+    table = grail_table_box(payload)
+    if table is not None:
+        write_grail_table_object(out_dir, table, len(positions))
     version_path.write_text(GRAIL_OBJECT_ASSET_VERSION + "\n", encoding="utf-8")
     return out_dir
 
@@ -718,6 +1027,8 @@ def make_runtime_config(
 
     configure_single_smpl_template(config, seq_key, seq_dir)
     normalize_solver_config(config)
+    if getattr(args, "scene_mode", None):
+        config.setdefault("solver", {})["retarget_scene_mode"] = str(args.scene_mode)
     source_motion = load_samp_motion(seq_dir)
     object_cfg = config.setdefault("hsi_hoi", {}).setdefault("object", {})
     object_cfg["output_up"] = source_motion["output_up"]
@@ -837,6 +1148,12 @@ def hsi_result_compatible(
             saved_frames = int(np.asarray(data["qpos"]).shape[0])
             saved_seq_key = str(np.asarray(data["source_sequence_key"]).item())
             saved_format = str(np.asarray(data["source_format"]).item())
+            saved_scene_mode = (
+                str(np.asarray(data["retarget_scene_mode"]).item()) if "retarget_scene_mode" in data.files else "scaled"
+            )
+        expected_scene_mode = str(section(config, "solver").get("retarget_scene_mode", "scaled")).lower()
+        if saved_scene_mode != expected_scene_mode:
+            raise ValueError(f"saved scene mode={saved_scene_mode}, expected scene mode={expected_scene_mode}")
         expected_frames = expected_frame_count(config, motion_npz)
         if expected_frames >= 0 and saved_frames != expected_frames:
             raise ValueError(f"saved_frames={saved_frames}, expected_frames={expected_frames}")
@@ -889,7 +1206,13 @@ def run_pipeline(args, work_dir: Path):
             work_dir,
         )
         if is_grail_sequence(seq_dir)
-        else seq_dir
+        else prepare_standard_object_collision(
+            seq_key,
+            seq_dir,
+            base_config,
+            args.force_retarget,
+            args.dry_run,
+        )
     )
     motion_npz = export_standard_motion_npz(
         seq_key,
@@ -927,6 +1250,9 @@ def run_pipeline(args, work_dir: Path):
         if (not slots_path.exists() or not correspondence_slots_compatible(slots_path, config)) and not args.dry_run:
             dataset_path = build_correspondence_dataset(config, force=args.force_build, dry_run=args.dry_run)
             slots_path = train_correspondence(config, dataset_path, force=args.force_train, dry_run=args.dry_run)
+        slots_path = ensure_retarget_slots(
+            config, slots_path, force_build=args.force_build, force_train=args.force_train, dry_run=args.dry_run
+        )
         result_path = retarget_hsi_motion(
             config,
             slots_path,

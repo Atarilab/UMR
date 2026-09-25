@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hand Correspondence</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #f3f6fa; color: #18202a; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #panel { position: fixed; inset: 0 auto 0 0; width: 270px; box-sizing: border-box; padding: 16px; background: rgba(248,250,252,.97); border-right: 1px solid #cdd5df; overflow-y: auto; }
+    h1 { margin: 0 0 18px; font-size: 15px; line-height: 1.3; }
+    .section { margin: 16px 0 8px; padding-top: 12px; border-top: 1px solid #d8dee7; font-size: 12px; font-weight: 750; }
+    .control { display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 12px; }
+    .control input[type="checkbox"], .control input[type="radio"] { width: 16px; height: 16px; accent-color: #2479b6; }
+    .control input[type="range"], .control select { min-width: 0; flex: 1; accent-color: #2479b6; }
+    button { width: 100%; height: 32px; border: 0; border-radius: 6px; background: #dde4eb; color: #17212b; font-weight: 700; cursor: pointer; }
+    button:hover { background: #ced9e3; }
+    #stats, #selection { margin-top: 10px; font-size: 11px; line-height: 1.55; color: #485563; }
+    #stats table { width: 100%; border-collapse: collapse; }
+    #stats td, #stats th { padding: 2px 3px; text-align: right; }
+    #stats td:first-child, #stats th:first-child { text-align: left; }
+    .swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+    #labels { position: fixed; left: 290px; right: 20px; top: 18px; display: grid; grid-template-columns: repeat(4, 1fr); pointer-events: none; }
+    #labels span { text-align: center; font-size: 13px; font-weight: 750; color: #25313d; text-shadow: 0 1px 0 #fff; }
+    #error { display: none; position: fixed; left: 290px; right: 20px; bottom: 18px; padding: 12px; border-radius: 6px; background: #a52f36; color: #fff; white-space: pre-wrap; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <aside id="panel">
+    <h1 id="title">Hand correspondence</h1>
+    <div class="section">Colour slots by</div>
+    <label class="control"><input type="radio" name="colorMode" value="correspondence" checked /> Correspondence (matched slots share a colour)</label>
+    <label class="control"><input type="radio" name="colorMode" value="part" /> Finger</label>
+    <label class="control"><input type="radio" name="colorMode" value="mismatch" /> Mismatch (robot slot on another finger)</label>
+    <div class="section">Show</div>
+    <label class="control"><input id="showMeshes" type="checkbox" checked /> Hand meshes</label>
+    <label class="control"><input id="showSlots" type="checkbox" checked /> Learned slots</label>
+    <label class="control">Lines for <select id="lineFinger"><option value="-1">none</option></select></label>
+    <div class="section">Rendering</div>
+    <label class="control">Point size <input id="pointSize" type="range" min="0.001" max="0.008" step="0.0005" value="0.0035" /></label>
+    <button id="resetCamera">Reset camera</button>
+    <div class="section">Selection</div>
+    <div id="selection">Click a slot to highlight its partner.</div>
+    <div class="section">Mapping</div>
+    <div id="stats">Loading...</div>
+  </aside>
+  <div id="labels"><span>Left SMPL-X</span><span>Left robot</span><span>Right SMPL-X</span><span>Right robot</span></div>
+  <div id="error"></div>
+  <script type="module" src="./app.js?v=1"></script>
+</body>
+</html>

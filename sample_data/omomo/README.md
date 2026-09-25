@@ -56,6 +56,33 @@ with its convex hull. Per-sequence manifests, duplicate pose arrays, frame-time
 arrays, and conversion metadata are optional provenance rather than required
 pipeline input.
 
+## Convert a release snapshot
+
+`scripts/prepare_omomo_sequences.py` produces the layout above from an OMOMO
+snapshot that holds `motions/**/<sequence-key>.npz` and `captured_objects/`.
+It pads OMOMO's 66-channel root-plus-body pose block out to the 165-channel
+SMPL-X vector, writes the per-frame object transform as
+`prop_<object-name>.csv`, and decomposes each captured mesh once with CoACD
+into `object_mjcf/assets/`.
+
+```bash
+python scripts/prepare_omomo_sequences.py \
+  --source /path/to/omomo_release \
+  --output sample_data/omomo \
+  --seq-key sub1_plasticbox_015
+```
+
+Omit `--seq-key` to convert every sequence found below `--source`. Sequences
+that share an object reuse its decomposed meshes, so the sequence-local MJCF
+carries OMOMO's per-sequence object scale as a `scale` attribute on the mesh
+assets instead of baking it into the shared geometry.
+
+OMOMO labels every subject `male` or `female`, so the converted sequences
+require the matching `smpl/SMPLX_MALE.pkl` or `smpl/SMPLX_FEMALE.pkl`. Pass
+`--gender neutral` to record the neutral model instead when only
+`SMPLX_NEUTRAL.pkl` is available; the retarget then runs against a less
+faithful body shape.
+
 ## Run locally prepared data
 
 ```bash

@@ -1,7 +1,7 @@
 {
   "robot": {
     "name": "unitree_g1_rh56e2",
-    "xml": "../assets/g1_rh56e2/mujoco/generated/g1_29dof_rh56e2.xml",
+    "xml": "../assets/g1_rh56e2/mujoco/g1_29dof_rh56e2_umr.xml",
     "point_cloud_center": "body:waist_yaw_link",
     "tpose_qpos": {
       "left_shoulder_roll_joint": 1.57079632679,
@@ -10,14 +10,255 @@
       "right_elbow_joint": 1.57079632679
     },
     "joint_limits": {
-      "left_knee_joint": [0.1, "inf"],
-      "right_knee_joint": [0.1, "inf"],
-      "left_wrist_pitch_joint": [-0.3, 0.8],
-      "right_wrist_pitch_joint": [-0.3, 0.8],
-      "left_elbow_joint": ["-inf", 1.57079632679],
-      "right_elbow_joint": ["-inf", 1.57079632679],
-      "left_shoulder_pitch_joint": [-3.0, 1.4],
-      "right_shoulder_pitch_joint": [-3.0, 1.4]
+      "left_knee_joint": [
+        0.1,
+        "inf"
+      ],
+      "right_knee_joint": [
+        0.1,
+        "inf"
+      ],
+      "left_wrist_pitch_joint": [
+        -0.3,
+        0.8
+      ],
+      "right_wrist_pitch_joint": [
+        -0.3,
+        0.8
+      ],
+      "left_elbow_joint": [
+        "-inf",
+        1.57079632679
+      ],
+      "right_elbow_joint": [
+        "-inf",
+        1.57079632679
+      ],
+      "left_shoulder_pitch_joint": [
+        -3.0,
+        1.4
+      ],
+      "right_shoulder_pitch_joint": [
+        -3.0,
+        1.4
+      ]
+    },
+    "joint_couplings": "mjcf",
+    "hands": {
+      "enabled": true,
+      "num_points": 512,
+      "part_offset": 4.0,
+      "sides": {
+        "left": {
+          "wrist_body": "left_wrist_yaw_link",
+          "frame_bodies": {
+            "index": "l_rh_left_index_1",
+            "middle": "l_rh_left_middle_1",
+            "pinky": "l_rh_left_pinky_1"
+          },
+          "parts": {
+            "palm": {
+              "bodies": [
+                "l_rh_flange",
+                "l_rh_left_hand_base"
+              ]
+            },
+            "thumb": {
+              "bodies": [
+                "l_rh_left_thumb_1",
+                "l_rh_left_thumb_2",
+                "l_rh_left_thumb_3",
+                "l_rh_left_thumb_4"
+              ],
+              "origin_body": "l_rh_left_thumb_1"
+            },
+            "index": {
+              "bodies": [
+                "l_rh_left_index_1",
+                "l_rh_left_index_2"
+              ],
+              "origin_body": "l_rh_left_index_1"
+            },
+            "middle": {
+              "bodies": [
+                "l_rh_left_middle_1",
+                "l_rh_left_middle_2"
+              ],
+              "origin_body": "l_rh_left_middle_1"
+            },
+            "ring": {
+              "bodies": [
+                "l_rh_left_ring_1",
+                "l_rh_left_ring_2"
+              ],
+              "origin_body": "l_rh_left_ring_1"
+            },
+            "pinky": {
+              "bodies": [
+                "l_rh_left_pinky_1",
+                "l_rh_left_pinky_2"
+              ],
+              "origin_body": "l_rh_left_pinky_1"
+            }
+          },
+          "tip_sites": {
+            "thumb": "l_rh_thumb_force_sensor_4",
+            "index": "l_rh_index_force_sensor_3",
+            "middle": "l_rh_middle_force_sensor_3",
+            "ring": "l_rh_ring_force_sensor_3",
+            "pinky": "l_rh_pinky_force_sensor_3"
+          }
+        },
+        "right": {
+          "wrist_body": "right_wrist_yaw_link",
+          "frame_bodies": {
+            "index": "r_rh_right_index_1",
+            "middle": "r_rh_right_middle_1",
+            "pinky": "r_rh_right_pinky_1"
+          },
+          "parts": {
+            "palm": {
+              "bodies": [
+                "r_rh_flange",
+                "r_rh_right_hand_base"
+              ]
+            },
+            "thumb": {
+              "bodies": [
+                "r_rh_right_thumb_1",
+                "r_rh_right_thumb_2",
+                "r_rh_right_thumb_3",
+                "r_rh_right_thumb_4"
+              ],
+              "origin_body": "r_rh_right_thumb_1"
+            },
+            "index": {
+              "bodies": [
+                "r_rh_right_index_1",
+                "r_rh_right_index_2"
+              ],
+              "origin_body": "r_rh_right_index_1"
+            },
+            "middle": {
+              "bodies": [
+                "r_rh_right_middle_1",
+                "r_rh_right_middle_2"
+              ],
+              "origin_body": "r_rh_right_middle_1"
+            },
+            "ring": {
+              "bodies": [
+                "r_rh_right_ring_1",
+                "r_rh_right_ring_2"
+              ],
+              "origin_body": "r_rh_right_ring_1"
+            },
+            "pinky": {
+              "bodies": [
+                "r_rh_right_pinky_1",
+                "r_rh_right_pinky_2"
+              ],
+              "origin_body": "r_rh_right_pinky_1"
+            }
+          },
+          "tip_sites": {
+            "thumb": "r_rh_thumb_force_sensor_4",
+            "index": "r_rh_index_force_sensor_3",
+            "middle": "r_rh_middle_force_sensor_3",
+            "ring": "r_rh_ring_force_sensor_3",
+            "pinky": "r_rh_pinky_force_sensor_3"
+          }
+        }
+      },
+      "dataset": {
+        "seed": 0,
+        "surface_oversample_ratio": 8,
+        "exterior_surface": true,
+        "exterior_method": "first_hit"
+      },
+      "train": {
+        "epochs": 3000,
+        "fixed_template": true,
+        "batch_size": 1,
+        "normalize": "none",
+        "template_sort": "x_y_z",
+        "repulsion_weight": 0.002,
+        "repulsion_radius": 0.05,
+        "edge_weight": 0.4,
+        "edge_graph": "geodesic",
+        "edge_k": 16
+      },
+      "merge": {
+        "drop_body_slots": "human_or_robot"
+      },
+      "retarget": {
+        "target_mode": "part_proportional"
+      },
+      "segment_costs": {
+        "leftHand": {
+          "sample_slots": 24,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "leftThumb": {
+          "sample_slots": 20,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "leftIndex": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "leftMiddle": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "leftRing": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "leftPinky": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightHand": {
+          "sample_slots": 24,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightThumb": {
+          "sample_slots": 20,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightIndex": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightMiddle": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightRing": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        },
+        "rightPinky": {
+          "sample_slots": 16,
+          "point_cost": 10.0,
+          "normal_cost": 1.0
+        }
+      }
     }
+  },
+  "retarget": {
+    "zero_source_finger_pose": false
   }
 }

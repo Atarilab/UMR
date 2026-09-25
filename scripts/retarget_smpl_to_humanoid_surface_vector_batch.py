@@ -1683,6 +1683,12 @@ def main(argv=None):
     smpl_slot_name = args.smpl_name
     if smpl_slot_name == "auto":
         smpl_slot_name = str(template_cfg["name"])
+    with np.load(args.slots, allow_pickle=True) as slot_file:
+        if "hand_slot_side" in slot_file.files:
+            raise ValueError(
+                "The batch retargeter does not support dedicated hand correspondences or joint couplings; "
+                "use humanoid_retarget_pipeline.py / humanoid_retarget_pipeline_hsi_hoi.py for robot.hands configs."
+            )
     smpl_slots, center_mode, smpl_slot_name = common.load_slot_data(args.slots, smpl_slot_name, args.slots_field)
     robot_slots, _robot_center, robot_slot_name = common.load_slot_data(args.slots, args.robot_name, args.slots_field)
     robot_height = resolve_robot_height(args, robot_slots, robot_slot_name)

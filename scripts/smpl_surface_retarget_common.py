@@ -503,9 +503,18 @@ def smplx_motion_vertices_joints(
     smplx_batch_size=None,
     smplx_batch_size_max=10000,
     smplx_batch_size_safety_factor=0.8,
+    source_hand_pose=False,
+    hand_pose_convention="flat",
 ):
     gender = str(sequence.get("gender", "neutral")).lower()
     pose_aa = np.asarray(sequence["pose_aa"], dtype=np.float32)[frame_ids]
+    use_hand_pose = bool(source_hand_pose) and pose_aa.shape[1] >= 165
+    if bool(source_hand_pose) and not use_hand_pose:
+        print(
+            f"[SurfaceRetarget][SMPLX][WARN] source has {pose_aa.shape[1]} pose channels, no hand pose; "
+            "using flat hands."
+        )
+    hand_pose_mean = smplx_hand_pose_mean(model_dir, gender, hand_pose_convention) if use_hand_pose else None
     transl = np.asarray(sequence.get("trans_orig", np.zeros((len(pose_aa), 3))), dtype=np.float32)[frame_ids]
     betas = np.asarray(sequence.get("beta", np.zeros(10)), dtype=np.float32).reshape(-1)[:10]
     betas = np.pad(betas, (0, max(0, 10 - len(betas))))[:10]
@@ -557,14 +566,20 @@ def smplx_motion_vertices_joints(
             batch_betas = torch.from_numpy(np.repeat(betas[None, :], bs, axis=0).astype(np.float32)).to(device)
             batch_trans = torch.from_numpy(transl[start:end]).to(device)
             zeros_hand = torch.zeros((bs, 45), dtype=torch.float32, device=device)
+            left_hand = zeros_hand
+            right_hand = zeros_hand
+            if use_hand_pose:
+                # SMPL-X layout: 75:120 left hand, 120:165 right hand, axis-angle per finger joint.
+                left_hand = pose[:, 75:120] + torch.from_numpy(hand_pose_mean[0]).to(device)
+                right_hand = pose[:, 120:165] + torch.from_numpy(hand_pose_mean[1]).to(device)
             with torch.no_grad():
                 out = model(
                     global_orient=pose[:, 0:3],
                     body_pose=pose[:, 3:66],
                     betas=batch_betas,
                     transl=batch_trans,
-                    left_hand_pose=zeros_hand,
-                    right_hand_pose=zeros_hand,
+                    left_hand_pose=left_hand,
+                    right_hand_pose=right_hand,
                     return_verts=True,
                 )
         except RuntimeError as error:
@@ -583,7 +598,7 @@ def smplx_motion_vertices_joints(
             continue
         batch_vertices = out.vertices.detach().cpu().numpy().astype(np.float32)
         batch_joints = out.joints.detach().cpu().numpy().astype(np.float32)
-        del out, pose, batch_betas, batch_trans, zeros_hand
+        del out, pose, batch_betas, batch_trans, zeros_hand, left_hand, right_hand
         human_scale = float(sequence.get("human_scale", 1.0))
         human_scale_mode = str(sequence.get("human_scale_mode", "off")).lower()
         if human_scale_mode == "local" and not np.isclose(human_scale, 1.0):
@@ -599,6 +614,24 @@ def smplx_motion_vertices_joints(
     return np.concatenate(vertices, axis=0), np.concatenate(joints, axis=0), faces
 
 
+def smplx_hand_pose_mean(model_dir, gender, convention="flat"):
+    """(2, 45) offset added to source hand poses before the flat-hand-mean model.
+
+    ``flat``: poses are absolute with 0 = flat hand (the template convention).
+    ``pca_mean``: poses are relative to the SMPL-X mean hand, as with
+    ``flat_hand_mean=False`` models.
+    """
+    convention = str(convention or "flat").lower()
+    if convention == "flat":
+        return np.zeros((2, 45), dtype=np.float32)
+    if convention != "pca_mean":
+        raise ValueError(f"source_hand_pose_convention must be 'flat' or 'pca_mean', got {convention!r}")
+    model = load_smplx_model(model_dir, gender, 1, flat_hand_mean=False)
+    return np.stack(
+        [model.left_hand_mean.detach().cpu().numpy(), model.right_hand_mean.detach().cpu().numpy()]
+    ).astype(np.float32).reshape(2, 45)
+
+
 def source_motion_vertices_joints(
     sequence,
     frame_ids,
@@ -610,6 +643,7 @@ def source_motion_vertices_joints(
     smplx_batch_size=None,
     smplx_batch_size_max=10000,
     smplx_batch_size_safety_factor=0.8,
+    hand_pose_convention="flat",
 ):
     if is_nr_sequence(sequence):
         return nr_source.motion_vertices_joints(sequence, frame_ids)
@@ -630,6 +664,8 @@ def source_motion_vertices_joints(
         smplx_batch_size=smplx_batch_size,
         smplx_batch_size_max=smplx_batch_size_max,
         smplx_batch_size_safety_factor=smplx_batch_size_safety_factor,
+        source_hand_pose=not bool(zero_source_finger_pose),
+        hand_pose_convention=hand_pose_convention,
     )
 
 
@@ -1042,36 +1078,6 @@ def build_robot_self_penetration_cache(model, args):
         if int(model.geom_contype[geom_id]) == 0 and int(model.geom_conaffinity[geom_id]) == 0:
             continue
         robot_geoms.append(int(geom_id))
-    # Some robot models overlap themselves while just standing there: on the G1 each ankle_roll
-    # link sits 20 mm inside its own knee link. Those pairs are a property of the description, not
-    # of the motion, and no pose can separate them, so asking the solver to try would distort every
-    # frame. Detect them once at the neutral pose and exclude them by geom id, which needs no
-    # knowledge of the robot's naming.
-    neutral = np.zeros(model.nq, dtype=np.float64)
-    for joint_id in range(model.njnt):
-        if int(model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE):
-            neutral[int(model.jnt_qposadr[joint_id]) + 3] = 1.0
-    scratch = mujoco.MjData(model)
-    scratch.qpos[:] = neutral
-    mujoco.mj_forward(model, scratch)
-    mujoco.mj_collision(model, scratch)
-    robot_geom_set = {int(geom_id) for geom_id in robot_geoms}
-    excluded_pairs = set()
-    for contact_id in range(scratch.ncon):
-        contact = scratch.contact[contact_id]
-        geom1, geom2 = int(contact.geom1), int(contact.geom2)
-        if geom1 in robot_geom_set and geom2 in robot_geom_set and float(contact.dist) < 0.0:
-            excluded_pairs.add((min(geom1, geom2), max(geom1, geom2)))
-    if excluded_pairs:
-        names = ", ".join(
-            f"{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[a])) or a}"
-            f"~{mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[b])) or b}"
-            for a, b in sorted(excluded_pairs)
-        )
-        print(
-            f"[SurfaceRetarget][RobotSelfPenetration] excluding {len(excluded_pairs)} geom pairs that "
-            f"already overlap at the neutral pose: {names}"
-        )
     print(
         f"[SurfaceRetarget][RobotSelfPenetration] cost={float(args.robot_self_penetration_cost):.4f}, "
         f"hard_constraint={hard_enabled}, "
@@ -1084,7 +1090,6 @@ def build_robot_self_penetration_cache(model, args):
     return {
         "geom_ids": np.asarray(robot_geoms, dtype=np.int32),
         "labels": labels,
-        "excluded_pairs": excluded_pairs,
     }
 
 
@@ -1178,7 +1183,6 @@ def compute_robot_self_penetration_rows(model, data, cache, collision_threshold)
                 candidates.add((min(geom1, geom2), max(geom1, geom2)))
     finally:
         model.geom_margin[:] = saved_margin
-    candidates -= set(cache.get("excluded_pairs", ()))
 
     jacobians = []
     distances = []
@@ -1347,35 +1351,42 @@ def _finite_difference_matrix(length: int, order: int):
     return sparse.diags(diagonals, offsets=np.arange(order + 1), shape=(rows, length), format="csc")
 
 
-def smooth_trajectory_lqr(
-    values,
+def lqr_smooth_qpos_sequence(
+    model,
+    qpos_seq,
+    qpos_columns,
+    joint_limits_by_qpos=None,
     data_cost=1.0,
     velocity_cost=0.0,
     acceleration_cost=0.0,
     jerk_cost=0.0,
+    include_root_translation=False,
     anchor_start_frames=0,
     anchor_end_frames=0,
 ):
-    """Least-squares fixed-interval smoother for a ``(frames, channels)`` trajectory.
-
-    Minimises ``data_cost * ||x - x_raw||^2`` plus the first/second/third finite-difference
-    energies. Shared by the retargeted-qpos filter below and by the HSI/HOI source-warp anchor,
-    so both express "smooth this trajectory" with one implementation.
-    """
-    values = np.asarray(values, dtype=np.float64)
-    if values.ndim != 2:
-        raise ValueError(f"values must be 2D, got {values.shape}")
-    smoothed = values.copy()
-    frames = int(smoothed.shape[0])
-    if frames <= 1 or smoothed.shape[1] == 0:
-        return smoothed
+    """LQR-style fixed-interval smoother for retargeted qpos trajectories."""
+    qpos = np.asarray(qpos_seq, dtype=np.float64)
+    if qpos.ndim != 2:
+        raise ValueError(f"qpos_seq must be 2D, got {qpos.shape}")
+    filtered = qpos.copy()
+    frames = int(filtered.shape[0])
+    if frames <= 1:
+        return filtered
 
     data_cost = max(float(data_cost), 1e-12)
     velocity_cost = max(float(velocity_cost), 0.0)
     acceleration_cost = max(float(acceleration_cost), 0.0)
     jerk_cost = max(float(jerk_cost), 0.0)
     if velocity_cost <= 0.0 and acceleration_cost <= 0.0 and jerk_cost <= 0.0:
-        return smoothed
+        return filtered
+
+    columns = []
+    if include_root_translation:
+        columns.extend([0, 1, 2])
+    columns.extend(int(col) for col in qpos_columns)
+    columns = sorted({col for col in columns if 0 <= col < filtered.shape[1]})
+    if not columns:
+        return filtered
 
     system = data_cost * sparse.eye(frames, dtype=np.float64, format="csc")
     if velocity_cost > 0.0 and frames > 1:
@@ -1388,7 +1399,7 @@ def smooth_trajectory_lqr(
         diff = _finite_difference_matrix(frames, 3)
         system = system + jerk_cost * (diff.T @ diff)
 
-    rhs = data_cost * smoothed
+    rhs = data_cost * filtered[:, columns]
     anchor_start_frames = max(int(anchor_start_frames), 0)
     anchor_end_frames = max(int(anchor_end_frames), 0)
     fixed = []
@@ -1402,99 +1413,21 @@ def smooth_trajectory_lqr(
         free_mask = np.ones(frames, dtype=bool)
         free_mask[fixed] = False
         free = np.flatnonzero(free_mask).astype(np.int32)
-        smoothed[fixed] = values[fixed]
+        filtered[fixed[:, None], columns] = qpos[fixed[:, None], columns]
         if free.size:
             system_csc = system.tocsc()
-            rhs_free = rhs[free] - system_csc[free][:, fixed] @ values[fixed]
+            rhs_free = rhs[free] - system_csc[free][:, fixed] @ qpos[fixed[:, None], columns]
             solved = sparse_linalg.spsolve(system_csc[free][:, free], rhs_free)
             solved = np.asarray(solved, dtype=np.float64)
             if solved.ndim == 1:
                 solved = solved.reshape(free.size, 1)
-            smoothed[free] = solved
+            filtered[free[:, None], columns] = solved
     else:
         solved = sparse_linalg.spsolve(system.tocsc(), rhs)
         solved = np.asarray(solved, dtype=np.float64)
         if solved.ndim == 1:
             solved = solved.reshape(frames, 1)
-        smoothed[:] = solved
-    return smoothed
-
-
-def lqr_smooth_qpos_sequence(
-    model,
-    qpos_seq,
-    qpos_columns,
-    joint_limits_by_qpos=None,
-    data_cost=1.0,
-    velocity_cost=0.0,
-    acceleration_cost=0.0,
-    jerk_cost=0.0,
-    include_root_translation=False,
-    anchor_start_frames=0,
-    anchor_end_frames=0,
-    include_root_rotation=False,
-):
-    """LQR-style fixed-interval smoother for retargeted qpos trajectories.
-
-    ``include_root_rotation`` also filters the free joint's quaternion. The four components are
-    smoothed as ordinary columns and renormalised, which is valid because consecutive frames are
-    close at motion-capture rates; the sign of each quaternion is aligned to its predecessor first,
-    since q and -q are the same rotation and a flip would otherwise be smoothed as a real rotation.
-    """
-    qpos = np.asarray(qpos_seq, dtype=np.float64)
-    if qpos.ndim != 2:
-        raise ValueError(f"qpos_seq must be 2D, got {qpos.shape}")
-    filtered = qpos.copy()
-    frames = int(filtered.shape[0])
-    if frames <= 1:
-        return filtered
-
-    if (
-        max(float(velocity_cost), 0.0) <= 0.0
-        and max(float(acceleration_cost), 0.0) <= 0.0
-        and max(float(jerk_cost), 0.0) <= 0.0
-    ):
-        return filtered
-
-    if include_root_rotation and filtered.shape[1] >= 7:
-        aligned = np.asarray(qpos[:, 3:7], dtype=np.float64).copy()
-        for frame_idx in range(1, frames):
-            if float(np.dot(aligned[frame_idx], aligned[frame_idx - 1])) < 0.0:
-                aligned[frame_idx] = -aligned[frame_idx]
-        smoothed_quat = smooth_trajectory_lqr(
-            aligned,
-            data_cost=data_cost,
-            velocity_cost=velocity_cost,
-            acceleration_cost=acceleration_cost,
-            jerk_cost=jerk_cost,
-            anchor_start_frames=anchor_start_frames,
-            anchor_end_frames=anchor_end_frames,
-        )
-        norms = np.maximum(np.linalg.norm(smoothed_quat, axis=1, keepdims=True), 1e-12)
-        filtered[:, 3:7] = smoothed_quat / norms
-
-    columns = []
-    if include_root_translation:
-        columns.extend([0, 1, 2])
-    columns.extend(int(col) for col in qpos_columns)
-    columns = sorted({col for col in columns if 0 <= col < filtered.shape[1]})
-    if not columns:
-        if include_root_rotation and filtered.shape[1] >= 7:
-            for frame_idx in range(frames):
-                filtered[frame_idx] = clamp_joint_ranges(
-                    model, filtered[frame_idx], joint_limits_by_qpos=joint_limits_by_qpos
-                )
-        return filtered
-
-    filtered[:, columns] = smooth_trajectory_lqr(
-        qpos[:, columns],
-        data_cost=data_cost,
-        velocity_cost=velocity_cost,
-        acceleration_cost=acceleration_cost,
-        jerk_cost=jerk_cost,
-        anchor_start_frames=anchor_start_frames,
-        anchor_end_frames=anchor_end_frames,
-    )
+        filtered[:, columns] = solved
     for frame_idx in range(frames):
         filtered[frame_idx] = clamp_joint_ranges(model, filtered[frame_idx], joint_limits_by_qpos=joint_limits_by_qpos)
     return filtered
@@ -1743,13 +1676,17 @@ def solve_clarabel_qp_step(
             else np.asarray(global_step_dof_ids, dtype=np.int32).reshape(-1)
         )
         if dof_ids.size > 0:
-            l2_groups.append((dof_ids, global_step_size, "global_step_size"))
+            l2_groups.append((dof_ids, global_step_size, "global_step_size", None))
     for group_index, group in enumerate(l2_step_limits or []):
+        # Optional 4th entry: per-column weights, ||w * dq[dof_ids]|| <= radius (reduced coordinates).
+        weights = None
         if len(group) == 2:
             dof_ids, radius = group
             group_label = f"l2_step_limits[{group_index}]"
-        else:
+        elif len(group) == 3:
             dof_ids, radius, group_label = group
+        else:
+            dof_ids, radius, group_label, weights = group
         radius = float(radius)
         if not np.isfinite(radius):
             continue
@@ -1757,7 +1694,7 @@ def solve_clarabel_qp_step(
             raise ValueError(f"{group_label} must be positive for l2 step limit, got {radius}")
         dof_ids = np.asarray(dof_ids, dtype=np.int32).reshape(-1)
         if dof_ids.size > 0:
-            l2_groups.append((dof_ids, radius, str(group_label)))
+            l2_groups.append((dof_ids, radius, str(group_label), weights))
 
     # Clarabel solves 0.5 * x' P x + q' x subject to A x + s = b, s >= 0.
     # The box step limits are encoded as dq <= upper and -dq <= -lower.
@@ -1819,14 +1756,20 @@ def solve_clarabel_qp_step(
     cones = []
     if linear_rows > 0:
         cones.append(clarabel.NonnegativeConeT(linear_rows))
-    for dof_ids, radius, _group_label in l2_groups:
+    for dof_ids, radius, _group_label, weights in l2_groups:
         dof_ids = np.asarray(dof_ids, dtype=np.int32).reshape(-1)
-        dof_ids = dof_ids[(dof_ids >= 0) & (dof_ids < nvar)]
+        valid = (dof_ids >= 0) & (dof_ids < nvar)
+        dof_ids = dof_ids[valid]
         if dof_ids.size == 0:
             continue
         row_ids = np.arange(dof_ids.size, dtype=np.int32)
+        selector_values = (
+            -np.ones(dof_ids.size, dtype=np.float64)
+            if weights is None
+            else -np.asarray(weights, dtype=np.float64).reshape(-1)[valid]
+        )
         selector = sparse.coo_matrix(
-            (-np.ones(dof_ids.size, dtype=np.float64), (row_ids, dof_ids)),
+            (selector_values, (row_ids, dof_ids)),
             shape=(dof_ids.size, nvar),
         ).tocsc()
         if nslack > 0:
